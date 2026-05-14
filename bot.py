@@ -1,125 +1,114 @@
-import os
+import telebot
+from telebot import types
 import requests
-import time
-import json
+import os
 from flask import Flask
 from threading import Thread
 
-# --- НАСТРОЙКИ ---
-# Код сам возьмет токен из настроек сервера Render
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
-URL = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/'
-
-user_keys = {}
-user_states = {}
-
-# Мини-сервер, чтобы Render не выключал бота
+# Инициализация бота и веб-сервера
+token = os.environ.get('TELEGRAM_TOKEN')
+bot = telebot.TeleBot(token)
 app = Flask('')
 
+# --- Секция Веб-сервера для Render ---
 @app.route('/')
 def home():
-    return "Бот работает!"
+    return "Бот запущен и работает!"
 
-def run_web():
+def run():
     app.run(host='0.0.0.0', port=8080)
 
-def send_msg(chat_id, text, reply_markup=None):
-    data = {'chat_id': chat_id, 'text': text, 'parse_mode': 'Markdown'}
-    if reply_markup:
-        data['reply_markup'] = json.dumps(reply_markup)
-    requests.post(f'{URL}sendMessage', data=data)
+def keep_alive():
+    t = Thread(target=run)
+    t.start()
 
-def get_menu():
-    return {
-        # Создаем клавиатуру с новыми кнопками
-markup = types.InlineKeyboardMarkup(row_width=1)
+# --- Секция Бота ---
 
-# Кнопка для API ключа (бывший туториал)
-btn_api = types.InlineKeyboardButton("🟡 Как получить API Ключ", callback_data="tutorial")
+# Обработка команды /start
+@bot.message_handler(commands=['start'])
+def start(message):
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    
+    btn_api = types.InlineKeyboardButton("🔑 API Ключ", callback_data="tutorial")
+    btn_help = types.InlineKeyboardButton("📖 Как пользоваться", url="https://bot1-bwal.onrender.com/")
+    btn_input = types.InlineKeyboardButton("🟡 Ввести API Ключ", callback_data="input_api")
+    
+    markup.add(btn_api, btn_help, btn_input)
+    
+    bot.send_message(
+        message.chat.id, 
+        "👋 Привет! Я бот для генерации картинок через Stability AI.\n\n"
+        "1. Нажми 'API Ключ', чтобы узнать как его получить.\n"
+        "2. Нажми 'Ввести API Ключ', чтобы привязать его.\n"
+        "3. Кнопка 'Как пользоваться' откроет страницу проверки статуса.",
+        reply_markup=markup
+    )
 
-# Новая кнопка с инструкцией и ссылкой на твой Render
-btn_help = types.InlineKeyboardButton("📖 Как пользоваться ботом", url="https://bot1-bwal.onrender.com/")
+# Обработка кнопок
+@bot.callback_query_handler(func=lambda call: True)
+def callback_inline(call):
+    if call.data == "tutorial":
+        text = (
+            "Как получить API Ключ:\n"
+            "1. Зайди на сайт dreamstudio.ai\n"
+            "2. Создай аккаунт и зайди в Profile.\n"
+            "3. Скопируй свой API Key и вернись сюда."
+        )
+        bot.send_message(call.message.chat.id, text)
+        
+    elif call.data == "input_api":
+        sent = bot.send_message(call.message.chat.id, "Отправь мне свой API ключ одним сообщением:")
+        bot.register_next_step_handler(sent, save_api_key)
 
-# Кнопка для ввода ключа
-btn_input = types.InlineKeyboardButton("🔑 Ввести API Ключ", callback_data="input_api")
+# Сохранение ключа (в памяти на время работы сессии)
+user_keys = {}
 
-# Добавляем все кнопки в меню
-markup.add(btn_api, btn_help, btn_input)
+def save_api_key(message):
+    user_keys[message.from_user.id] = message.text
+    bot.send_message(message.chat.id, "✅ Ключ успешно привязан! Теперь просто напиши, что хочешь нарисовать (на английском).")
 
-    }
+# Генерация изображения
+@bot.message_handler(func=lambda message: True)
+def handle_text(message):
+    api_key = user_keys.get(message.from_user.id)
+    
+    if not api_key:
+        bot.send_message(message.chat.id, "❌ Сначала привяжи API ключ через меню!")
+        return
 
-def generate_and_send(chat_id, prompt, api_key):
-    api_host = 'https://api.stability.ai'
-    engine_id = 'stable-diffusion-xl-1024-v1-0' 
+    bot.send_message(message.chat.id, "🎨 Начинаю генерацию, подожди немного...")
+    
     try:
         response = requests.post(
-            f"{api_host}/v1/generation/{engine_id}/text-to-image",
+            "https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/text-to-image",
             headers={
                 "Content-Type": "application/json",
-                "Accept": "image/png",
-                "Authorization": f"Bearer {api_key}"
+                "Accept": "application/json",
+                "Authorization": f"Bearer {api_key}",
             },
             json={
-                "text_prompts": [{"text": prompt}],
+                "text_prompts": [{"text": message.text}],
                 "cfg_scale": 7,
                 "height": 1024,
                 "width": 1024,
                 "samples": 1,
                 "steps": 30,
             },
-            timeout=60
         )
-        if response.status_code != 200:
-            send_msg(chat_id, "❌ Ошибка ключа или баланса Stability AI.")
-            return
-        files = {'photo': ('result.png', response.content)}
-        requests.post(f'{URL}sendPhoto', data={'chat_id': chat_id, 'caption': "Готово!"}, files=files)
+
+        if response.status_code == 200:
+            import base64
+            data = response.json()
+            for i, image in enumerate(data["artifacts"]):
+                image_data = base64.b64decode(image["base64"])
+                bot.send_photo(message.chat.id, image_data)
+        else:
+            bot.send_message(message.chat.id, f"❌ Ошибка API: {response.text}")
+            
     except Exception as e:
-        send_msg(chat_id, f"❌ Ошибка: {e}")
+        bot.send_message(message.chat.id, f"⚠️ Произошла ошибка: {str(e)}")
 
-def handle_update(update):
-    msg = update.get("message")
-    if not msg or "text" not in msg: return
-    chat_id = msg["chat"]["id"]
-    text = msg["text"]
-    
-    if text == "/start":
-        user_states[chat_id] = None
-        send_msg(chat_id, "👋 Привет! Я бот для генерации картинок.", get_menu())
-    elif text == "📖 Туториал":
-        send_msg(chat_id, "1. Получи ключ на platform.stability.ai\n2. Нажми 'Ввести API ключ'.")
-    elif text == "🔑 Ввести API ключ":
-        user_states[chat_id] = "waiting_key"
-        send_msg(chat_id, "Жду твой ключ (начинается на sk-...).")
-    elif user_states.get(chat_id) == "waiting_key":
-        if text.startswith("sk-"):
-            user_keys[chat_id] = text
-            user_states[chat_id] = None
-            send_msg(chat_id, "✅ Ключ привязан!", get_menu())
-        else:
-            send_msg(chat_id, "❌ Неверный формат ключа.")
-    else:
-        key = user_keys.get(chat_id)
-        if not key:
-            send_msg(chat_id, "⚠️ Сначала введи ключ!", get_menu())
-        else:
-            send_msg(chat_id, "🎨 Рисую...")
-            generate_and_send(chat_id, text, key)
-
-def main():
-    offset = None
-    while True:
-        try:
-            r = requests.get(f'{URL}getUpdates', params={'timeout': 30, 'offset': offset})
-            data = r.json()
-            if "result" in data:
-                for update in data["result"]:
-                    offset = update["update_id"] + 1
-                    handle_update(update)
-            time.sleep(1)
-        except:
-            time.sleep(5)
-
-if __name__ == '__main__':
-    Thread(target=run_web).start()
-    main()
+# Запуск
+if __name__ == "__main__":
+    keep_alive()
+    bot.polling(none_stop=True)

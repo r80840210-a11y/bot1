@@ -29,9 +29,9 @@ def keep_alive():
 def start(message):
     markup = types.InlineKeyboardMarkup(row_width=1)
     
-    btn_api = types.InlineKeyboardButton("🟡 Как получить API Ключ", callback_data="tutorial")
-    btn_help = types.InlineKeyboardButton("📖 Как пользоваться ботом", url="https://bot1-bwal.onrender.com/")
-    btn_input = types.InlineKeyboardButton("🔑 Ввести API Ключ", callback_data="input_api")
+    btn_api = types.InlineKeyboardButton("🔑 API Ключ", callback_data="tutorial")
+    btn_help = types.InlineKeyboardButton("📖 Как пользоваться", url="https://bot1-bwal.onrender.com/")
+    btn_input = types.InlineKeyboardButton("🟡 Ввести API Ключ", callback_data="input_api")
     
     markup.add(btn_api, btn_help, btn_input)
     
@@ -47,16 +47,14 @@ def start(message):
 # Обработка кнопок
 @bot.callback_query_handler(func=lambda call: True)
 def callback_inline(call):
-        if call.data == "tutorial":
+    if call.data == "tutorial":
         text = (
-            "🔑 **Как получить API Ключ (Hugging Face):**\n\n"
-            "1. Перейди по ссылке: https://huggingface.co/settings/tokens\n"
-            "2. Войди в аккаунт или создай новый.\n"
-            "3. Нажми **'New token'**, введи любое имя и выбери тип **'Write'**.\n"
-            "4. Скопируй созданный токен (он начинается на `hf_...`) и отправь его мне через кнопку 'Ввести API Ключ'."
+            "Как получить API Ключ:\n"
+            "1. Зайди на сайт https://platform.stability.ai/account/keys"
+            "2. Создай аккаунт и зайди в Profile.\n"
+            "3. Скопируй свой API Key и вернись сюда."
         )
-        bot.send_message(call.message.chat.id, text, parse_mode="Markdown")
-
+        bot.send_message(call.message.chat.id, text)
         
     elif call.data == "input_api":
         sent = bot.send_message(call.message.chat.id, "Отправь мне свой API ключ одним сообщением:")

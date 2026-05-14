@@ -31,8 +31,21 @@ def send_msg(chat_id, text, reply_markup=None):
 
 def get_menu():
     return {
-        "keyboard": [[{"text": "🔑 Ввести API ключ"}, {"text": "📖 Туториал"}]],
-        "resize_keyboard": True
+        # Создаем клавиатуру с новыми кнопками
+markup = types.InlineKeyboardMarkup(row_width=1)
+
+# Кнопка для API ключа (бывший туториал)
+btn_api = types.InlineKeyboardButton("🟡 Как получить API Ключ", callback_data="tutorial")
+
+# Новая кнопка с инструкцией и ссылкой на твой Render
+btn_help = types.InlineKeyboardButton("📖 Как пользоваться ботом", url="https://bot1-bwal.onrender.com/")
+
+# Кнопка для ввода ключа
+btn_input = types.InlineKeyboardButton("🔑 Ввести API Ключ", callback_data="input_api")
+
+# Добавляем все кнопки в меню
+markup.add(btn_api, btn_help, btn_input)
+
     }
 
 def generate_and_send(chat_id, prompt, api_key):

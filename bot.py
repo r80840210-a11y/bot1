@@ -1,7 +1,6 @@
 import telebot
+from telebot import types
 import os
-import re
-import time
 from flask import Flask
 from threading import Thread
 
@@ -9,15 +8,13 @@ token = os.environ.get('TELEGRAM_TOKEN')
 bot = telebot.TeleBot(token)
 app = Flask('')
 
-# Простой список матерных слов (дополняй своими)
-BAD_WORDS = ['мат1', 'мат2', 'спамворд'] 
-
-# База данных для варнов (предупреждений) в памяти
-user_warnings = {}
+# База данных в памяти сервера
+in_search = []  # Список ID тех, кто ищет собеседника
+active_chats = {}  # Словарь пар вида {ID_1: ID_2, ID_2: ID_1}
 
 @app.route('/')
 def home():
-    return "Супер-модератор активен!"
+    return "Чат-рулетка активна и работает!"
 
 def run():
     app.run(host='0.0.0.0', port=8080)
@@ -26,142 +23,98 @@ def keep_alive():
     t = Thread(target=run)
     t.start()
 
-# Функция для расчета времени бана/мута
-def parse_time(time_str):
-    if not time_str:
-        return None
-    match = re.match(r'(\d+)([mhd])', time_str.lower())
-    if not match:
-        return None
-    amount, unit = int(match.group(1)), match.group(2)
-    if unit == 'm': return time.time() + amount * 60
-    if unit == 'h': return time.time() + amount * 3600
-    if unit == 'd': return time.time() + amount * 86400
-    return None
+# Главное меню с кнопками
+def main_menu():
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add(types.KeyboardButton("🔍 Найти собеседника"))
+    return markup
 
-# --- ПРИВЕТСТВИЕ И ПРАВИЛА ---
-@bot.message_handler(content_types=['new_chat_members'])
-def welcome_new_member(message):
-    for new_user in message.new_chat_members:
-        # Проверяем, что это не сам бот
-        if new_user.id == bot.get_me().id:
-            continue
-            
-        rules_text = (
-            f"👋 **Привет, {new_user.first_name}!** Добро пожаловать в наш чат!\n\n"
-            f"📜 **Пожалуйста, соблюдай наши правила:**\n"
-            f"1️⃣ Никакого спама и сторонних ссылок (бот удалит автоматически).\n"
-            f"2️⃣ Общайся без мата и оскорблений (за 3 предупреждения — бан).\n"
-            f"3️⃣ Не пиши сообщения КАПСОМ.\n"
-            f"4️⃣ Уважай других участников чата.\n\n"
-            f"Приятного общения! Нарушителей порядка ловит наш бот-шериф 👮‍♂️"
-        )
-        bot.send_message(message.chat.id, rules_text, parse_mode="Markdown")
+def stop_menu():
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add(types.KeyboardButton("🛑 Завершить диалог"))
+    return markup
 
-# --- КОМАНДЫ АДМИНИСТРАТОРА (!бан, !мут, !кик, !варн) ---
-
-@bot.message_handler(func=lambda message: message.text and message.text.startswith(('!бан', '!мут', '!кик', '!варн')))
-def admin_commands(message):
-    # Проверяем, админ ли тот, кто пишет команду
-    chat_member = bot.get_chat_member(message.chat.id, message.from_user.id)
-    if chat_member.status not in ['administrator', 'creator']:
-        return
-
-    # Должен быть ответ на сообщение
-    if not message.reply_to_message:
-        bot.reply_to_message(message, "⚠️ Эту команду нужно писать в ответ на сообщение нарушителя!")
-        return
-
-    target_user = message.reply_to_message.from_user
-    args = message.text.split()
-    command = args[0].lower()
-
-    # --- КОМАНДА !БАН ---
-    if command == '!бан':
-        until_date = parse_time(args[1]) if len(args) > 1 else None
-        time_text = f"на {args[1]}" if until_date else "навсегда"
-        try:
-            bot.ban_chat_member(message.chat.id, target_user.id, until_date=until_date)
-            bot.send_message(message.chat.id, f"🚫 {target_user.first_name} заблокирован {time_text}!")
-        except Exception as e:
-            bot.reply_to_message(message, f"Ошибка: {e}")
-
-    # --- КОМАНДА !МУТ (Запрет писать сообщения) ---
-    elif command == '!мут':
-        duration = args[1] if len(args) > 1 else "10m" # По умолчанию 10 минут
-        until_date = parse_time(duration)
-        try:
-            # Забираем права на отправку сообщений
-            bot.restrict_chat_member(
-                message.chat.id, target_user.id, until_date=until_date,
-                can_send_messages=False, can_send_media_messages=False,
-                can_send_polls=False, can_send_other_messages=False
-            )
-            bot.send_message(message.chat.id, f"🤫 {target_user.first_name} отправлен в мут на {duration}!")
-        except Exception as e:
-            bot.reply_to_message(message, f"Ошибка: {e}")
-
-    # --- КОМАНДА !КИК (Выгнать из чата) ---
-    elif command == '!кик':
-        try:
-            bot.ban_chat_member(message.chat.id, target_user.id)
-            bot.unban_chat_member(message.chat.id, target_user.id) # Сразу разбаниваем, чтобы мог войти обратно
-            bot.send_message(message.chat.id, f"💨 {target_user.first_name} был вышвырнут из чата!")
-        except Exception as e:
-            bot.reply_to_message(message, f"Ошибка: {e}")
-
-    # --- КОМАНДА !ВАРН (Предупреждение) ---
-    elif command == '!варн':
-        user_id = target_user.id
-        user_warnings[user_id] = user_warnings.get(user_id, 0) + 1
-        count = user_warnings[user_id]
+# Команда /start
+@bot.message_handler(commands=['start'])
+def start(message):
+    chat_id = message.chat.id
+    # Если пользователь был в чате, убираем его оттуда
+    if chat_id in active_chats:
+        bot.send_message(active_chats[chat_id], "🔴 Собеседник покинул чат.", reply_markup=main_menu())
+        del active_chats[active_chats[chat_id]]
+        del active_chats[chat_id]
+    if chat_id in in_search:
+        in_search.remove(chat_id)
         
-        if count >= 3:
-            try:
-                bot.ban_chat_member(message.chat.id, user_id, until_date=time.time() + 86400) # Бан на 1 день за 3 варна
-                bot.send_message(message.chat.id, f"💥 {target_user.first_name} получил 3-е предупреждение и отправляется в бан на 24 часа!")
-                user_warnings[user_id] = 0 # Сбрасываем счетчик
-            except Exception as e:
-                bot.reply_to_message(message, f"Ошибка: {e}")
+    bot.send_message(
+        chat_id, 
+        "👋 Добро пожаловать в Анонимную Чат-Рулетку!\n\n"
+        "Нажми кнопку ниже, чтобы найти случайного собеседника. Все диалоги полностью анонимны.", 
+        reply_markup=main_menu()
+    )
+
+# Обработка текстовых кнопок и сообщений
+@bot.message_handler(func=lambda message: True, content_types=['text', 'photo', 'voice', 'sticker'])
+def handle_message(message):
+    chat_id = message.chat.id
+    text = message.text
+
+    # --- КНОПКА: НАЙТИ СОБЕСЕДНИКА ---
+    if text == "🔍 Найти собеседника":
+        if chat_id in active_chats:
+            bot.send_message(chat_id, "⚠️ Вы уже находитесь в активном диалоге!")
+            return
+        if chat_id in in_search:
+            bot.send_message(chat_id, "⏳ Вы уже ищете собеседника...")
+            return
+
+        # Если в очереди кто-то есть, соединяем
+        if in_search:
+            companion_id = in_search.pop(0)
+            active_chats[chat_id] = companion_id
+            active_chats[companion_id] = chat_id
+            
+            bot.send_message(chat_id, "🎉 Собеседник найден! Приятного общения. Напиши 'Привет' 👋", reply_markup=stop_menu())
+            bot.send_message(companion_id, "🎉 Собеседник найден! Приятного общения. Напиши 'Привет' 👋", reply_markup=stop_menu())
         else:
-            bot.send_message(message.chat.id, f"⚠️ {target_user.first_name}, тебе выдано предупреждение ({count}/3)! Веди себя прилично.")
+            # Если никого нет, встаем в очередь
+            in_search.append(chat_id)
+            bot.send_message(chat_id, "🔍 Ищу собеседника... Пожалуйста, подожди.", reply_markup=types.ReplyKeyboardRemove())
 
-# --- АВТО-УДАЛЕНИЕ МАТА, ССЫЛОК И КАПСА ---
-@bot.message_handler(func=lambda message: True)
-def moderate_chat(message):
-    # Админов не трогаем
-    chat_member = bot.get_chat_member(message.chat.id, message.from_user.id)
-    if chat_member.status in ['administrator', 'creator']:
-        return
+    # --- КНОПКА: ЗАВЕРШИТЬ ДИАЛОГ ---
+    elif text == "🛑 Завершить диалог":
+        if chat_id in active_chats:
+            companion_id = active_chats[chat_id]
+            
+            bot.send_message(chat_id, "🛑 Вы завершили диалог.", reply_markup=main_menu())
+            bot.send_message(companion_id, "🔴 Собеседник завершил диалог.", reply_markup=main_menu())
+            
+            # Удаляем пару из активных чатов
+            del active_chats[chat_id]
+            del active_chats[companion_id]
+        elif chat_id in in_search:
+            in_search.remove(chat_id)
+            bot.send_message(chat_id, "❌ Поиск отменен.", reply_markup=main_menu())
+        else:
+            bot.send_message(chat_id, "Вы не находитесь в диалоге.", reply_markup=main_menu())
 
-    text = message.text if message.text else ""
-    
-    # 1. Ссылки
-    if re.search(r'(https?://\S+|t\.me/\S+)', text.lower()):
-        try:
-            bot.delete_message(message.chat.id, message.message_id)
-            bot.send_message(message.chat.id, f"⚠️ {message.from_user.first_name}, ссылки запрещены!")
-            return
-        except: pass
-
-    # 2. Мат
-    for word in BAD_WORDS:
-        if word in text.lower():
-            try:
-                bot.delete_message(message.chat.id, message.message_id)
-                bot.send_message(message.chat.id, f"🤬 {message.from_user.first_name}, маты запрещены!")
-                return
-            except: pass
-
-    # 3. Анти-Капс (Если в тексте больше 5 букв и они ВСЕ заглавные)
-    if text.isupper() and len(text) > 5:
-        try:
-            bot.delete_message(message.chat.id, message.message_id)
-            bot.send_message(message.chat.id, f" Нажми Caps Lock, {message.from_user.first_name}! Зачем так орать?")
-            return
-        except: pass
+    # --- ПЕРЕСЫЛКА СООБЩЕНИЙ СОБЕСЕДНИКУ ---
+    else:
+        if chat_id in active_chats:
+            companion_id = active_chats[chat_id]
+            
+            # Пересылаем текст, фото, голос или стикеры
+            if message.content_type == 'text':
+                bot.send_message(companion_id, message.text)
+            elif message.content_type == 'photo':
+                bot.send_photo(companion_id, message.photo[-1].file_id, caption=message.caption)
+            elif message.content_type == 'voice':
+                bot.send_voice(companion_id, message.voice.file_id)
+            elif message.content_type == 'sticker':
+                bot.send_sticker(companion_id, message.sticker.file_id)
+        else:
+            bot.send_message(chat_id, "📋 Чтобы начать общение, нажми кнопку «🔍 Найти собеседника»", reply_markup=main_menu())
 
 if __name__ == "__main__":
     keep_alive()
     bot.polling(none_stop=True)
-

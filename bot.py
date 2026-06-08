@@ -16,8 +16,8 @@ STATS_FILE = "/tmp/stats.json"
 # Твой личный Telegram ID (Главный админ / Создатель)
 CREATOR_ID = 6624873620
 
-# Очередь поиска: [user_id1, user_id2, ...]
-search_queue = []
+# Очередь поиска по хэштегам: {'#игры': [id1, id2], 'общий': [id3, id4]}
+search_queues = {'общий': []}
 
 # Активные диалоги: {user_id: partner_id}
 active_chats = {}
@@ -86,6 +86,19 @@ def init_user_stats(user_id):
         user_stats[user_id] = {'chats_count': 0, 'likes': 0, 'dislikes': 0}
         save_stats()
 
+def get_user_queue_category(user_id):
+    """Поиск в какой очереди сейчас находится пользователь"""
+    for cat, q in search_queues.items():
+        if user_id in q:
+            return cat
+    return None
+
+def remove_from_all_queues(user_id):
+    """Удаление пользователя из всех очередей поиска"""
+    for cat in search_queues.keys():
+        if user_id in search_queues[cat]:
+            search_queues[cat].remove(user_id)
+
 load_stats()
 
 
@@ -97,6 +110,13 @@ def get_main_menu():
     markup.add(types.KeyboardButton("📊 Мой профиль"))
     return markup
 
+def get_search_type_menu():
+    """Выбор типа поиска"""
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add(types.KeyboardButton("🌐 Искать кого угодно"), types.KeyboardButton("🏷 Поиск по интересам"))
+    markup.add(types.KeyboardButton("🔄 Главное меню"))
+    return markup
+
 def get_search_menu():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add(types.KeyboardButton("❌ Отменить поиск"))
@@ -105,7 +125,7 @@ def get_search_menu():
 def get_chat_menu():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add(types.KeyboardButton("🛑 Завершить диалог"))
-    markup.add(types.KeyboardButton("🚨 Пожаловаться")) # Новая кнопка жалобы
+    markup.add(types.KeyboardButton("🚨 Пожаловаться"))
     return markup
 
 def get_rating_menu():
@@ -117,6 +137,7 @@ def get_rating_menu():
 def get_admin_menu(user_id):
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("📊 Статистика и Онлайн", callback_data="admin_stats"))
+    markup.add(types.InlineKeyboardButton("🔍 Инфо о юзере (Пробить)", callback_data="admin_info"))
     markup.add(types.InlineKeyboardButton("📢 Сделать рассылку (Реклама)", callback_data="admin_broadcast"))
     markup.add(types.InlineKeyboardButton("🔨 Забанить юзера", callback_data="admin_ban"))
     markup.add(types.InlineKeyboardButton("🔓 Разбанить юзера", callback_data="admin_unban"))
@@ -145,18 +166,22 @@ def admin_callbacks(call):
 
     if call.data == "admin_stats":
         total_users = len(user_stats)
-        in_queue = len(search_queue)
+        in_queue = sum(len(q) for q in search_queues.values())
         in_chat = len(active_chats) // 2
         
         stats_msg = (
             "📊 *АКТУАЛЬНАЯ СТАТИСТИКА БОТА*\n\n"
             f"👥 Всего юзеров в базе (JSON): {total_users}\n"
-            f"⏳ Людей в очереди поиска: {in_queue}\n"
+            f"⏳ Людей в поиске (все очереди): {in_queue}\n"
             f"💬 Общаются прямо сейчас (Онлайн): {in_chat} пар(ы)\n"
             f"🚫 Забаненных пользователей: {len(banned_users)}\n"
             f"👑 Активных временных админов: {len(temporary_admins)}"
         )
         bot.send_message(user_id, stats_msg, parse_mode="Markdown", reply_markup=get_admin_menu(user_id))
+
+    elif call.data == "admin_info":
+        states[user_id] = {'step': "waiting_for_info_id"}
+        bot.send_message(user_id, "🔍 Введите Telegram ID пользователя, чтобы пробить инфо:")
 
     elif call.data == "admin_broadcast":
         states[user_id] = {'step': "waiting_for_broadcast_text"}
@@ -201,7 +226,7 @@ def start_command(message):
     init_user_stats(user_id)
     welcome_text = (
         "👋 Привет в Анонимном Чат-Рулетке!\n\n"
-        "Здесь ты можешь найти случайного собеседника и пообщаться на любые темы.\n"
+        "Здесь ты можешь найти случайного собеседника по интересам или просто поболтать.\n"
         "Твой профиль сохраняется автоматически!"
     )
     bot.send_message(user_id, welcome_text, reply_markup=get_main_menu())
@@ -228,23 +253,42 @@ def show_profile(message):
     bot.send_message(user_id, profile_text, parse_mode="Markdown", reply_markup=get_main_menu())
 
 @bot.message_handler(func=lambda message: message.text in ["🔍 Искать собеседника", "🔄 Главное меню"])
-def start_search(message):
+def choose_search_type(message):
     user_id = message.chat.id
-    if user_id in banned_users:
-        bot.send_message(user_id, "❌ Вы заблокированы и не можете искать собеседников.")
-        return
-        
-    init_user_stats(user_id)
+    if user_id in banned_users: return
     
     if user_id in active_chats:
         bot.send_message(user_id, "Вы уже находитесь в диалоге!", reply_markup=get_chat_menu())
         return
-    if user_id in search_queue:
+    if get_user_queue_category(user_id):
         bot.send_message(user_id, "Вы уже ищете собеседника.", reply_markup=get_search_menu())
         return
+        
+    bot.send_message(user_id, "Выберите режим поиска собеседника:", reply_markup=get_search_type_menu())
 
-    if search_queue:
-        partner_id = search_queue.pop(0)
+@bot.message_handler(func=lambda message: message.text == "🌐 Искать кого угодно")
+def general_search(message):
+    user_id = message.chat.id
+    if user_id in banned_users or user_id in active_chats or get_user_queue_category(user_id): return
+    
+    execute_search(user_id, 'общий')
+
+@bot.message_handler(func=lambda message: message.text == "🏷 Поиск по интересам")
+def interest_search(message):
+    user_id = message.chat.id
+    if user_id in banned_users or user_id in active_chats or get_user_queue_category(user_id): return
+    
+    states[user_id] = {'step': 'waiting_for_hashtag'}
+    bot.send_message(user_id, "📝 Введите ключевое слово или хэштег того, что хотите обсудить\n_(например: #игры, #аниме, #кодинг, #музыка или просто слово):_")
+
+def execute_search(user_id, category):
+    init_user_stats(user_id)
+    
+    if category not in search_queues:
+        search_queues[category] = []
+        
+    if search_queues[category]:
+        partner_id = search_queues[category].pop(0)
         active_chats[user_id] = partner_id
         active_chats[partner_id] = user_id
         
@@ -255,17 +299,19 @@ def start_search(message):
         last_partners[user_id] = partner_id
         last_partners[partner_id] = user_id
         
-        bot.send_message(user_id, "🎉 Собеседник найден! Приятного общения.\nЧтобы прервать чат, нажмите кнопку ниже.", reply_markup=get_chat_menu())
-        bot.send_message(partner_id, "🎉 Собеседник найден! Приятного общения.\nЧтобы прервать чат, нажмите кнопку ниже.", reply_markup=get_chat_menu())
+        match_msg = f"🎉 Собеседник найден! Тема диалога: *{category}*.\nПриятного общения!"
+        bot.send_message(user_id, match_msg, parse_mode="Markdown", reply_markup=get_chat_menu())
+        bot.send_message(partner_id, match_msg, parse_mode="Markdown", reply_markup=get_chat_menu())
     else:
-        search_queue.append(user_id)
-        bot.send_message(user_id, "🔍 Ищу собеседника... Пожалуйста, подождите.", reply_markup=get_search_menu())
+        search_queues[category].append(user_id)
+        bot.send_message(user_id, f"🔍 Ищу собеседника по теме *{category}*... Пожалуйста, подождите.", parse_mode="Markdown", reply_markup=get_search_menu())
 
 @bot.message_handler(func=lambda message: message.text == "❌ Отменить поиск")
 def cancel_search(message):
     user_id = message.chat.id
-    if user_id in search_queue:
-        search_queue.remove(user_id)
+    category = get_user_queue_category(user_id)
+    if category:
+        remove_from_all_queues(user_id)
         bot.send_message(user_id, "❌ Поиск отменен.", reply_markup=get_main_menu())
     else:
         bot.send_message(user_id, "Вы не находились в поиске.", reply_markup=get_main_menu())
@@ -284,23 +330,18 @@ def stop_chat(message):
     else:
         bot.send_message(user_id, "Вы не находитесь в диалоге.", reply_markup=get_main_menu())
 
-# Кнопка "🚨 Пожаловаться"
 @bot.message_handler(func=lambda message: message.text == "🚨 Пожаловаться")
 def report_user(message):
     user_id = message.chat.id
     if user_id in active_chats:
         partner_id = active_chats[user_id]
-        
-        # Оповещаем создателя бота и всех админов из списка
-        report_text = f"🚨 *ПОСТУПИЛА ЖАЛОБА!*\n\nПользователь `{user_id}` пожаловался на своего собеседника: `{partner_id}`."
-        try:
-            bot.send_message(CREATOR_ID, report_text, parse_mode="Markdown")
+        report_text = f"🚨 *ПОСТУПИЛА ЖАЛОБА!*\n\nПользователь `{user_id}` пожаловался на собеседника: `{partner_id}`."
+        try: bot.send_message(CREATOR_ID, report_text, parse_mode="Markdown")
         except: pass
         for adm in temporary_admins.keys():
             try: bot.send_message(adm, report_text, parse_mode="Markdown")
             except: pass
-            
-        bot.send_message(user_id, "✅ Ваша жалоба отправлена администрации. Спасибо за бдительность!")
+        bot.send_message(user_id, "✅ Ваша жалоба отправлена администрации. Спасибо!")
     else:
         bot.send_message(user_id, "Вы не находитесь в диалоге.")
 
@@ -338,12 +379,44 @@ def echo_all(message):
     user_id = message.chat.id
     if user_id in banned_users: return
 
-    # Обработка шагов админки
+    # Обработка шагов админки и ввода хэштегов
     if user_id in states:
         user_state = states[user_id]
         step = user_state['step']
         
-        if step == "waiting_for_broadcast_text" and message.text:
+        if step == 'waiting_for_hashtag' and message.text:
+            del states[user_id]
+            tag = message.text.strip().lower()
+            if not tag.startswith('#'):
+                tag = '#' + tag
+            execute_search(user_id, tag)
+            return
+
+        elif step == "waiting_for_info_id" and message.text:
+            del states[user_id]
+            try:
+                target_id = int(message.text)
+                init_user_stats(target_id)
+                u_info = user_stats[target_id]
+                
+                is_u_ban = "Да 🚫" if target_id in banned_users else "Нет ✅"
+                is_u_adm = "Главный админ 👑" if target_id == CREATOR_ID else ("Временный админ 👮‍♂️" if target_id in temporary_admins else "Обычный юзер 👤")
+                
+                info_msg = (
+                    f"🔍 *ИНФОРМАЦИЯ О ПОЛЬЗОВАТЕЛЕ `{target_id}`*\n\n"
+                    f"🗣 Проведено диалогов: {u_info['chats_count']}\n"
+                    f"👍 Лайков: {u_info['likes']}\n"
+                    f"👎 Дизлайков: {u_info['dislikes']}\n"
+                    f"✨ Карма: {u_info['likes'] - u_info['dislikes']}\n"
+                    f"⚡️ Роль в боте: {is_u_adm}\n"
+                    f"🔨 В бане: {is_u_ban}"
+                )
+                bot.send_message(user_id, info_msg, parse_mode="Markdown", reply_markup=get_admin_menu(user_id))
+            except ValueError:
+                bot.send_message(user_id, "❌ Неверный формат ID. Введите число.")
+            return
+
+        elif step == "waiting_for_broadcast_text" and message.text:
             del states[user_id]
             text_to_send = message.text
             success_count = 0
@@ -364,13 +437,13 @@ def echo_all(message):
                     return
                 if target_id not in banned_users:
                     banned_users.append(target_id)
-                    # Если нарушитель в чате — отключаем его
                     if target_id in active_chats:
                         p_id = active_chats[target_id]
                         del active_chats[target_id]
                         if p_id in active_chats: del active_chats[p_id]
                         try: bot.send_message(p_id, "🛑 Ваш собеседник был заблокирован администратором.", reply_markup=get_main_menu())
                         except: pass
+                    remove_from_all_queues(target_id)
                     save_stats()
                     bot.send_message(user_id, f"🔨 Пользователь `{target_id}` успешно забанен.", parse_mode="Markdown", reply_markup=get_admin_menu(user_id))
                     try: bot.send_message(target_id, "❌ Вы были заблокированы администрацией бота за нарушение правил.")
@@ -389,7 +462,7 @@ def echo_all(message):
                     banned_users.remove(target_id)
                     save_stats()
                     bot.send_message(user_id, f"🔓 Пользователь `{target_id}` успешно разбанен.", parse_mode="Markdown", reply_markup=get_admin_menu(user_id))
-                    try: bot.send_message(target_id, "🎉 Вы были разблокированы администрацией и снова можете общаться!")
+                    try: bot.send_message(target_id, "🎉 Вы были разблокированы администрацией!")
                     except: pass
                 else:
                     bot.send_message(user_id, "Данный ID не найден в черном списке.")
@@ -437,7 +510,7 @@ def echo_all(message):
                 bot.send_message(user_id, "❌ Неверный формат ID.")
             return
 
-    # Пересылка внутри чата БЕЗ СЛИВА СООБЩЕНИЙ АДМИНУ
+    # Пересылка сообщений в активном чате
     if user_id in active_chats:
         partner_id = active_chats[user_id]
         try:
@@ -452,7 +525,7 @@ def echo_all(message):
         except Exception as e:
             bot.send_message(user_id, "⚠️ Не удалось доставить сообщение. Возможно, собеседник покинул бота.")
     else:
-        if message.text not in ["🔍 Искать собеседника", "📊 Мой профиль", "❌ Отменить поиск", "🛑 Завершить диалог", "🚨 Пожаловаться", "👍 Понравился", "👎 Скучный", "🔄 Главное меню"]:
+        if message.text not in ["🔍 Искать собеседника", "📊 Мой профиль", "❌ Отменить поиск", "🛑 Завершить диалог", "🚨 Пожаловаться", "👍 Понравился", "👎 Скучный", "🔄 Главное меню", "🌐 Искать кого угодно", "🏷 Поиск по интересам"]:
             bot.send_message(user_id, "У вас нет активного диалога. Нажмите кнопку ниже, чтобы найти собеседника.", reply_markup=get_main_menu())
 
 

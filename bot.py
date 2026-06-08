@@ -9,8 +9,8 @@ TOKEN = os.environ.get('TELEGRAM_TOKEN')
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
-# Файл для вечного хранения статистики
-STATS_FILE = "stats.json"
+# Файл для вечного хранения статистики в разрешенной папке /tmp/
+STATS_FILE = "/tmp/stats.json"
 
 # Очередь поиска: [user_id1, user_id2, ...]
 search_queue = []
@@ -30,8 +30,8 @@ def load_stats():
     if os.path.exists(STATS_FILE):
         try:
             with open(STATS_FILE, "r", encoding="utf-8") as f:
-                # Превращаем ключи обратно в инты (в JSON они всегда строки)
                 data = json.load(f)
+                # Превращаем ключи обратно в инты
                 user_stats = {int(k): v for k, v in data.items()}
         except Exception as e:
             print(f"Ошибка загрузки базы данных: {e}")
@@ -45,7 +45,7 @@ def save_stats():
         with open(STATS_FILE, "w", encoding="utf-8") as f:
             json.dump(user_stats, f, ensure_ascii=False, indent=4)
     except Exception as e:
-        print(f"Ошибка сохранения базы данных: {e}")
+        print(f"Ошибка保存 базы данных: {e}")
 
 def init_user_stats(user_id):
     """Создание пустого профиля, если юзер зашел впервые"""
@@ -139,10 +139,10 @@ def start_search(message):
         active_chats[user_id] = partner_id
         active_chats[partner_id] = user_id
         
-        # Обновляем "вечную" статистику чатов
+        # Обновляем статистику чатов
         user_stats[user_id]['chats_count'] += 1
         user_stats[partner_id]['chats_count'] += 1
-        save_stats() # Сохраняем в JSON файл
+        save_stats()
         
         # Запоминаем для системы лайков
         last_partners[user_id] = partner_id
@@ -193,7 +193,7 @@ def handle_like(message):
     if partner_id:
         init_user_stats(partner_id)
         user_stats[partner_id]['likes'] += 1
-        save_stats() # Сохраняем лайк
+        save_stats()
         del last_partners[user_id]
         bot.send_message(user_id, "❤️ Вы поставили лайк собеседнику! Спасибо за оценку.", reply_markup=get_main_menu())
     else:
@@ -208,7 +208,7 @@ def handle_dislike(message):
     if partner_id:
         init_user_stats(partner_id)
         user_stats[partner_id]['dislikes'] += 1
-        save_stats() # Сохраняем дизлайк
+        save_stats()
         del last_partners[user_id]
         bot.send_message(user_id, "👎 Вы поставили дизлайк собеседнику.", reply_markup=get_main_menu())
     else:
@@ -221,7 +221,6 @@ def handle_dislike(message):
 def echo_all(message):
     user_id = message.chat.id
     
-    # Если юзер в активном чате — пересылаем его сообщение собеседнику
     if user_id in active_chats:
         partner_id = active_chats[user_id]
         
@@ -243,11 +242,10 @@ def echo_all(message):
             elif message.document:
                 bot.send_document(partner_id, message.document.file_id, caption=message.caption)
         except Exception as e:
-            # Если сообщение не дошло (например, партнер заблокировал бота)
             bot.send_message(user_id, "⚠️ Не удалось доставить сообщение. Возможно, собеседник покинул бота.")
     else:
-        # Если юзер просто пишет текст вне чата и это не кнопка меню
-        bot.send_message(user_id, "У вас нет активного диалога. Нажмите кнопку ниже, чтобы найти собеседника.", reply_markup=get_main_menu())
+        if message.text not in ["🔍 Искать собеседника", "📊 Мой профиль", "❌ Отменить поиск", "🛑 Завершить диалог", "👍 Понравился", "👎 Скучный", "🔄 Главное меню"]:
+            bot.send_message(user_id, "У вас нет активного диалога. Нажмите кнопку ниже, чтобы найти собеседника.", reply_markup=get_main_menu())
 
 
 # --- НАСТРОЙКИ FLASK ДЛЯ RENDER ---
@@ -262,7 +260,7 @@ def getMessage():
 @app.route("/")
 def webhook():
     bot.remove_webhook()
-    bot.set_webhook(url="https://your-render-app-name.onrender.com/" + TOKEN) # На Render это подхватится автоматически
+    bot.set_webhook(url="https://bot1-bwal.onrender.com/" + TOKEN) # Твоя ссылка со скриншота!
     return "Бот работает!", 200
 
 if __name__ == "__main__":

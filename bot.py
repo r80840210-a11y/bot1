@@ -264,5 +264,7 @@ def webhook():
     return "Бот работает!", 200
 
 if __name__ == "__main__":
-    bot.remove_webhook()
-    bot.infinity_polling(skip_pending=True)
+    # Получаем порт, который Render автоматически выдает приложению
+    port = int(os.environ.get("PORT", 5000))
+    # Запускаем веб-сервер Flask, чтобы Render увидел открытый порт
+    app.run(host="0.0.0.0", port=port)

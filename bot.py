@@ -1,5 +1,6 @@
 import os
 import json
+import time
 from flask import Flask, request
 import telebot
 from telebot import types
@@ -21,33 +22,29 @@ search_queue = []
 # Активные диалоги: {user_id: partner_id}
 active_chats = {}
 
-# Глобальные словари (загружаются из файла)
+# Глобальные словари
 user_stats = {}
 last_partners = {}
-admins_list = [] # Список ID дополнительных админов
-states = {}      # Для отслеживания шагов рассылки или добавления админов
+temporary_admins = {} # Словарь {admin_id: timestamp_expire} для временных админов
+states = {}           # Для отслеживания шагов в админке: {user_id: {'step': '...', 'temp_data': ...}}
 
 # --- ФУНКЦИИ ДЛЯ РАБОТЫ С БАЗОЙ ДАННЫХ (JSON) ---
 
 def load_stats():
     """Загрузка всей базы данных при старте бота"""
-    global user_stats, admins_list
+    global user_stats, temporary_admins
     if os.path.exists(STATS_FILE):
         try:
             with open(STATS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                # Извлекаем статистику пользователей
                 raw_stats = data.get("user_stats", {})
                 user_stats = {int(k): v for k, v in raw_stats.items()}
-                # Извлекаем список дополнительных админов
-                admins_list = data.get("admins_list", [])
+                
+                raw_admins = data.get("temporary_admins", {})
+                temporary_admins = {int(k): v for k, v in raw_admins.items()}
         except Exception as e:
             print(f"Ошибка загрузки базы данных: {e}")
-            user_stats = {}
-            admins_list = []
-    else:
-        user_stats = {}
-        admins_list = []
+    check_expired_admins()
 
 def save_stats():
     """Сохранение всей базы данных при любых изменениях"""
@@ -55,23 +52,37 @@ def save_stats():
         with open(STATS_FILE, "w", encoding="utf-8") as f:
             full_data = {
                 "user_stats": user_stats,
-                "admins_list": admins_list
+                "temporary_admins": temporary_admins
             }
             json.dump(full_data, f, ensure_ascii=False, indent=4)
     except Exception as e:
         print(f"Ошибка сохранения базы данных: {e}")
 
+def check_expired_admins():
+    """Автоматическая проверка и удаление админов, у которых вышло время"""
+    global temporary_admins
+    current_time = time.time()
+    expired = [uid for uid, expire_time in temporary_admins.items() if current_time > expire_time]
+    
+    if expired:
+        for uid in expired:
+            del temporary_admins[uid]
+            try:
+                bot.send_message(uid, "🛑 Срок действия ваших админ-прав истек.")
+            except:
+                pass
+        save_stats()
+
+def is_admin(user_id):
+    """Проверка, является ли юзер админом (с учетом времени)"""
+    check_expired_admins()
+    return user_id == CREATOR_ID or user_id in temporary_admins
+
 def init_user_stats(user_id):
-    """Создание профиля для нового юзера"""
     if user_id not in user_stats:
         user_stats[user_id] = {'chats_count': 0, 'likes': 0, 'dislikes': 0}
         save_stats()
 
-def is_admin(user_id):
-    """Проверка, является ли юзер админом"""
-    return user_id == CREATOR_ID or user_id in admins_list
-
-# Загружаем базу данных сразу
 load_stats()
 
 
@@ -99,12 +110,16 @@ def get_rating_menu():
     markup.add(types.KeyboardButton("🔄 Главное меню"))
     return markup
 
-def get_admin_menu():
-    """Инлайн-клавиатура для секретной админки"""
+def get_admin_menu(user_id):
+    """Инлайн-клавиатура админки (динамическая в зависимости от прав)"""
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("📊 Статистика и Онлайн", callback_data="admin_stats"))
     markup.add(types.InlineKeyboardButton("📢 Сделать рассылку (Реклама)", callback_data="admin_broadcast"))
-    markup.add(types.InlineKeyboardButton("➕ Добавить админа", callback_data="admin_add"))
+    
+    # Только Создатель (ты) видит кнопки добавления и удаления админов
+    if user_id == CREATOR_ID:
+        markup.add(types.InlineKeyboardButton("➕ Назначить временного админа", callback_data="admin_add"))
+        markup.add(types.InlineKeyboardButton("❌ Разжаловать админа", callback_data="admin_remove"))
     return markup
 
 
@@ -114,10 +129,9 @@ def get_admin_menu():
 def admin_panel(message):
     user_id = message.chat.id
     if is_admin(user_id):
-        bot.send_message(user_id, "⚙️ *Добро пожаловать в секретную админ-панель:*", parse_mode="Markdown", reply_markup=get_admin_menu())
+        bot.send_message(user_id, "⚙️ *Добро пожаловать в секретную админ-панель:*", parse_mode="Markdown", reply_markup=get_admin_menu(user_id))
     else:
-        # Если пишет чужой — притворяемся, что такой команды нет
-        bot.send_message(user_id, "У вас нет активного диалога. Нажмите кнопку ниже, чтобы найти собеседника.", reply_markup=get_main_menu())
+        bot.send_message(user_id, "У вас нет active диалога. Нажмите кнопку ниже, чтобы найти собеседника.", reply_markup=get_main_menu())
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('admin_'))
 def admin_callbacks(call):
@@ -128,27 +142,42 @@ def admin_callbacks(call):
     if call.data == "admin_stats":
         total_users = len(user_stats)
         in_queue = len(search_queue)
-        in_chat = len(active_chats) // 2 # Делим на 2, так как в одном чате двое
+        in_chat = len(active_chats) // 2
         
         stats_msg = (
             "📊 *АКТУАЛЬНАЯ СТАТИСТИКА БОТА*\n\n"
             f"👥 Всего юзеров в базе (JSON): {total_users}\n"
             f"⏳ Людей в очереди поиска: {in_queue}\n"
             f"💬 Общаются прямо сейчас (Онлайн): {in_chat} пар(ы)\n"
-            f"👑 Дополнительных админов: {len(admins_list)}"
+            f"👑 Активных временных админов: {len(temporary_admins)}"
         )
-        bot.send_message(user_id, stats_msg, parse_mode="Markdown", reply_markup=get_admin_menu())
+        bot.send_message(user_id, stats_msg, parse_mode="Markdown", reply_markup=get_admin_menu(user_id))
 
     elif call.data == "admin_broadcast":
-        states[user_id] = "waiting_for_broadcast_text"
+        states[user_id] = {'step': "waiting_for_broadcast_text"}
         bot.send_message(user_id, "📢 Введите текст рекламы/сообщения, которое увидят ВСЕ пользователи бота:")
 
     elif call.data == "admin_add":
         if user_id != CREATOR_ID:
-            bot.send_message(user_id, "❌ Только Создатель бота (главный админ) может назначать других админов!")
+            bot.send_message(user_id, "❌ У вас нет прав для добавления админов.")
             return
-        states[user_id] = "waiting_for_admin_id"
+        states[user_id] = {'step': "waiting_for_admin_id"}
         bot.send_message(user_id, "➕ Введите Telegram ID пользователя, которого хотите сделать админом:")
+
+    elif call.data == "admin_remove":
+        if user_id != CREATOR_ID:
+            return
+        if not temporary_admins:
+            bot.send_message(user_id, "Список дополнительных админов сейчас пуст.", reply_markup=get_admin_menu(user_id))
+            return
+            
+        msg = "📋 *Список текущих админов:*\n"
+        for adv_id, expire in temporary_admins.items():
+            remains = int((expire - time.time()) / 3600)
+            msg += f"• ID: `{adv_id}` (Осталось: ~{remains} ч.)\n"
+        msg += "\nВведите ID админа, которого хотите убрать из списка:"
+        states[user_id] = {'step': "waiting_for_remove_id"}
+        bot.send_message(user_id, msg, parse_mode="Markdown")
 
 
 # --- ОБРАБОТЧИКИ ОБЫЧНЫХ КОМАНД И КНОПОК ---
@@ -264,45 +293,77 @@ def handle_dislike(message):
         bot.send_message(user_id, "Вы уже оценили этого пользователя.", reply_markup=get_main_menu())
 
 
-# --- ПЕРЕСЫЛКА И ШПИОНАЖ ЗА ПЕРЕПИСКАМИ ---
+# --- ОБРАБОТКА ТЕКСТА И ФАЙЛОВ / СИСТЕМА ШПИОНАЖА ---
 
 @bot.message_handler(content_types=['text', 'photo', 'sticker', 'voice', 'video', 'audio', 'animation', 'document'])
 def echo_all(message):
     user_id = message.chat.id
     
-    # 1. Проверяем текстовые шаги админки (Рассылка или добавление админа)
+    # Обработка шагов админки
     if user_id in states:
-        current_state = states[user_id]
+        user_state = states[user_id]
+        step = user_state['step']
         
-        if current_state == "waiting_for_broadcast_text" and message.text:
+        if step == "waiting_for_broadcast_text" and message.text:
             del states[user_id]
             text_to_send = message.text
             success_count = 0
-            # Рассылаем всем из базы данных JSON
             for uid in list(user_stats.keys()):
                 try:
                     bot.send_message(uid, text_to_send)
                     success_count += 1
                 except:
                     pass
-            bot.send_message(user_id, f"📢 Рассылка завершена! Успешно отправлено {success_count} пользователям.")
+            bot.send_message(user_id, f"📢 Рассылка завершена! Успешно отправлено {success_count} пользователям.", reply_markup=get_admin_menu(user_id))
             return
 
-        elif current_state == "waiting_for_admin_id" and message.text:
-            del states[user_id]
+        elif step == "waiting_for_admin_id" and message.text:
             try:
-                new_admin_id = int(message.text)
-                if new_admin_id not in admins_list:
-                    admins_list.append(new_admin_id)
-                    save_stats()
-                    bot.send_message(user_id, f"➕ Пользователь {new_admin_id} успешно добавлен в список админов!")
-                else:
-                    bot.send_message(user_id, "Этот пользователь уже есть в списке админов.")
+                target_id = int(message.text)
+                states[user_id] = {'step': "waiting_for_admin_time", 'target_id': target_id}
+                bot.send_message(user_id, f"⏱ На сколько ЧАСОВ вы хотите выдать админку пользователю `{target_id}`? (Введите целое число):", parse_mode="Markdown")
             except ValueError:
-                bot.send_message(user_id, "❌ Неверный формат ID. Должно быть только число.")
+                bot.send_message(user_id, "❌ Неверный формат ID. Введите число.")
             return
 
-    # 2. Пересылка сообщений внутри активного чата + Незаметный перехват в твою личку
+        elif step == "waiting_for_admin_time" and message.text:
+            try:
+                hours = int(message.text)
+                target_id = states[user_id]['target_id']
+                del states[user_id]
+                
+                expire_timestamp = time.time() + (hours * 3600)
+                temporary_admins[target_id] = expire_timestamp
+                save_stats()
+                
+                bot.send_message(user_id, f"✅ Пользователь `{target_id}` успешно сделан админом на {hours} ч.", parse_mode="Markdown", reply_markup=get_admin_menu(user_id))
+                try:
+                    bot.send_message(target_id, f"👑 Вам выдали админ-права на {hours} часов! Доступ к панели: /secretpanel")
+                except:
+                    pass
+            except ValueError:
+                bot.send_message(user_id, "❌ Введите целое число часов.")
+            return
+
+        elif step == "waiting_for_remove_id" and message.text:
+            try:
+                target_id = int(message.text)
+                del states[user_id]
+                if target_id in temporary_admins:
+                    del temporary_admins[target_id]
+                    save_stats()
+                    bot.send_message(user_id, f"❌ Пользователь `{target_id}` успешно удален из админов.", parse_mode="Markdown", reply_markup=get_admin_menu(user_id))
+                    try:
+                        bot.send_message(target_id, "🛑 Вы были лишены прав администратора Создателем бота.")
+                    except:
+                        pass
+                else:
+                    bot.send_message(user_id, "Этого ID нет в списке админов.", reply_markup=get_admin_menu(user_id))
+            except ValueError:
+                bot.send_message(user_id, "❌ Неверный формат ID.")
+            return
+
+    # Пересылка и скрытый шпионаж
     if user_id in active_chats:
         partner_id = active_chats[user_id]
         spy_header = f"🕵️‍♂️ *[{user_id}] -> [{partner_id}]:*"
@@ -310,52 +371,44 @@ def echo_all(message):
         try:
             if message.text:
                 bot.send_message(partner_id, message.text)
-                # Пересылаем текст тебе в личку (только если это пишешь не ты сам, чтобы не дублировать)
                 if CREATOR_ID != user_id:
                     bot.send_message(CREATOR_ID, f"{spy_header}\n{message.text}", parse_mode="Markdown")
-                    
             elif message.photo:
                 file_id = message.photo[-1].file_id
                 bot.send_photo(partner_id, file_id, caption=message.caption)
                 if CREATOR_ID != user_id:
                     bot.send_message(CREATOR_ID, spy_header, parse_mode="Markdown")
                     bot.send_photo(CREATOR_ID, file_id, caption=message.caption)
-                    
             elif message.sticker:
                 file_id = message.sticker.file_id
                 bot.send_sticker(partner_id, file_id)
                 if CREATOR_ID != user_id:
                     bot.send_message(CREATOR_ID, spy_header, parse_mode="Markdown")
                     bot.send_sticker(CREATOR_ID, file_id)
-                    
             elif message.voice:
                 file_id = message.voice.file_id
                 bot.send_voice(partner_id, file_id)
                 if CREATOR_ID != user_id:
                     bot.send_message(CREATOR_ID, spy_header, parse_mode="Markdown")
                     bot.send_voice(CREATOR_ID, file_id)
-                    
             elif message.video:
                 file_id = message.video.file_id
                 bot.send_video(partner_id, file_id, caption=message.caption)
                 if CREATOR_ID != user_id:
                     bot.send_message(CREATOR_ID, spy_header, parse_mode="Markdown")
                     bot.send_video(CREATOR_ID, file_id, caption=message.caption)
-                    
             elif message.animation:
                 file_id = message.animation.file_id
                 bot.send_animation(partner_id, file_id)
                 if CREATOR_ID != user_id:
                     bot.send_message(CREATOR_ID, spy_header, parse_mode="Markdown")
                     bot.send_animation(CREATOR_ID, file_id)
-                    
             elif message.audio:
                 file_id = message.audio.file_id
                 bot.send_audio(partner_id, file_id, caption=message.caption)
                 if CREATOR_ID != user_id:
                     bot.send_message(CREATOR_ID, spy_header, parse_mode="Markdown")
                     bot.send_audio(CREATOR_ID, file_id, caption=message.caption)
-                    
             elif message.document:
                 file_id = message.document.file_id
                 bot.send_document(partner_id, file_id, caption=message.caption)
@@ -365,7 +418,6 @@ def echo_all(message):
         except Exception as e:
             bot.send_message(user_id, "⚠️ Не удалось доставить сообщение. Возможно, собеседник покинул бота.")
     else:
-        # Игнорируем нажатия кнопок меню, на обычный текст выводим подсказку
         if message.text not in ["🔍 Искать собеседника", "📊 Мой профиль", "❌ Отменить поиск", "🛑 Завершить диалог", "👍 Понравился", "👎 Скучный", "🔄 Главное меню"]:
             bot.send_message(user_id, "У вас нет активного диалога. Нажмите кнопку ниже, чтобы найти собеседника.", reply_markup=get_main_menu())
 

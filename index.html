@@ -1,131 +1,256 @@
 <!DOCTYPE html>
 <html lang="ru">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-  <title>StandFade Casino</title>
-  <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <style>
-    :root {
-      --bg: #0f111a;
-      --card-bg: #1a1d2d;
-      --accent: #ff4757;
-      --gold: #ffa502;
-      --text: #ffffff;
-      --text-dim: #707589;
-    }
+    <meta charset="UTF-8">
+    <title>CS Space Market: V2.1 FINAL</title>
+    <style>
+        :root {
+            --bg: #050505; --panel: rgba(20, 20, 25, 0.9); --accent: #ffffff;
+            --rare: #4b69ff; --mythical: #8847ff; --legendary: #d32ce6; --ancient: #eb4b4b; --gold: #ffd700;
+            --stattrak: #cf6a32;
+        }
+        body { font-family: 'Segoe UI', sans-serif; background: var(--bg); color: #fff; margin: 0; overflow-y: auto; overflow-x: hidden; min-height: 100vh; }
+        #particles-js { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: -1; }
+        .content { position: relative; z-index: 1; padding: 20px; max-width: 1400px; margin: 0 auto; padding-bottom: 100px; }
+        .hidden { display: none !important; }
+        
+        .header { display: flex; justify-content: space-between; align-items: center; background: var(--panel); padding: 20px; border-radius: 15px; border: 1px solid #333; backdrop-filter: blur(10px); margin-bottom: 20px; }
+        #game-title { cursor: pointer; font-weight: 900; letter-spacing: 3px; color: var(--accent); text-shadow: 0 0 10px #fff; }
+        .lvl-badge { background: var(--rare); padding: 2px 8px; border-radius: 5px; font-size: 12px; margin-left: 10px; }
 
-    * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', Roboto, sans-serif; user-select: none; }
-    body { background-color: var(--bg); color: var(--text); padding-bottom: 70px; }
+        .stats-bar { display: flex; gap: 20px; font-size: 13px; color: #aaa; margin-top: 5px; }
+        .stats-bar b { color: #fff; }
 
-    /* Шапка с балансом */
-    .header {
-      display: flex; justify-content: space-between; align-items: center;
-      padding: 15px 20px; background: var(--card-bg); border-bottom: 1px solid #2a2e45;
-    }
-    .brand { font-weight: 900; font-size: 18px; letter-spacing: 1px; color: var(--accent); }
-    .balance-box {
-      display: flex; align-items: center; gap: 8px;
-      background: #111322; padding: 6px 14px; border-radius: 20px; border: 1px solid var(--gold);
-    }
-    .balance-val { color: var(--gold); font-weight: bold; }
+        .case-section { background: var(--panel); padding: 30px; border-radius: 20px; text-align: center; margin-bottom: 20px; border: 1px solid #222; }
+        .roulette-window { position: relative; width: 100%; height: 140px; background: rgba(0,0,0,0.8); overflow: hidden; margin: 20px 0; border: 1px solid #444; border-radius: 10px; }
+        .pointer { position: absolute; left: 50%; top: 0; bottom: 0; width: 2px; background: #fff; z-index: 10; transform: translateX(-50%); box-shadow: 0 0 15px #fff; }
+        .track { display: flex; position: absolute; left: 0; top: 15px; transition: transform 4s cubic-bezier(0.1, 0, 0.1, 1); }
+        
+        .card { min-width: 130px; height: 110px; background: #111; margin: 0 5px; border-bottom: 5px solid #333; display: flex; flex-direction: column; align-items: center; justify-content: center; font-size: 11px; border-radius: 5px; text-align: center; padding: 5px; box-sizing: border-box; }
+        .card.rare { border-color: var(--rare); } .card.mythical { border-color: var(--mythical); } 
+        .card.legendary { border-color: var(--legendary); } .card.ancient { border-color: var(--ancient); } .card.gold { border-color: var(--gold); }
+        .st-tag { color: var(--stattrak); font-weight: bold; font-size: 10px; }
 
-    /* Контент вкладок */
-    .tab-content { display: none; padding: 15px; }
-    .tab-content.active { display: block; }
-
-    /* Карточки игр */
-    .game-card {
-      background: linear-gradient(135deg, #1e2235 0%, #141724 100%);
-      border-radius: 16px; padding: 16px; margin-bottom: 15px;
-      border: 1px solid #2e334d; display: flex; flex-direction: column; gap: 10px;
-    }
-    .game-title { font-size: 18px; font-weight: bold; }
-    .btn-play {
-      background: var(--accent); color: #fff; border: none; padding: 10px;
-      border-radius: 10px; font-weight: bold; cursor: pointer; text-transform: uppercase;
-    }
-
-    /* Нижняя навигация */
-    .bottom-nav {
-      position: fixed; bottom: 0; left: 0; right: 0; height: 65px;
-      background: #141622; border-top: 1px solid #282c42;
-      display: flex; justify-content: space-around; align-items: center;
-      backdrop-filter: blur(10px);
-    }
-    .nav-item {
-      display: flex; flex-direction: column; align-items: center; gap: 4px;
-      color: var(--text-dim); text-decoration: none; font-size: 11px; font-weight: 600;
-      background: none; border: none; width: 25%;
-    }
-    .nav-item.active { color: var(--accent); }
-    .nav-item svg { width: 22px; height: 22px; fill: currentColor; }
-  </style>
+        .grid { display: grid; grid-template-columns: 1fr 1.2fr 0.8fr; gap: 20px; }
+        .box { background: var(--panel); padding: 20px; border-radius: 15px; min-height: 500px; border: 1px solid #333; overflow-y: auto; max-height: 700px; }
+        .item { background: rgba(255,255,255,0.03); padding: 15px; margin-bottom: 12px; border-radius: 10px; border-left: 5px solid #444; display: flex; justify-content: space-between; align-items: center; cursor: pointer; transition: 0.2s; }
+        .item.selected { border: 2px solid var(--gold); background: rgba(255, 215, 0, 0.1); }
+        
+        button { background: #fff; border: none; padding: 12px 24px; border-radius: 8px; cursor: pointer; font-weight: bold; color: #000; transition: 0.3s; margin: 5px; }
+        button:hover:not(:disabled) { transform: scale(1.05); }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        #admin-panel { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: #000; padding: 25px; border: 2px solid var(--ancient); z-index: 2000; border-radius: 20px; width: 380px; }
+        input, select { background: #111; border: 1px solid #444; color: #fff; padding: 10px; margin: 5px 0; border-radius: 5px; width: 100%; box-sizing: border-box; }
+    </style>
 </head>
 <body>
 
-  <!-- Top Bar -->
-  <div class="header">
-    <div class="brand">STANDFADE</div>
-    <div class="balance-box">
-      <span>🪙</span>
-      <span class="balance-val" id="balance">1,250</span>
+<canvas id="particles-js"></canvas>
+
+<div id="admin-panel" class="hidden">
+    <h2 style="color: var(--ancient); text-align: center;">CREATOR CONSOLE</h2>
+    <input type="text" id="new-code-name" placeholder="КОД">
+    <select id="new-code-type">
+        <option value="money">Деньги ($)</option>
+        <option value="skin">Случайный Скин</option>
+    </select>
+    <input type="number" id="new-code-value" placeholder="Сумма">
+    <button onclick="createCustomPromo()" style="width: 100%; background: var(--ancient); color: #fff;">СОЗДАТЬ</button>
+    <button onclick="toggleAdmin()" style="background:#333; color:#fff; width: 100%;">ЗАКРЫТЬ</button>
+    <button onclick="fullReset()" style="background: red; color: #fff; width: 100%; margin-top: 10px; font-weight: bold;">WIPE ALL DATA (RESET)</button>
+</div>
+
+<div class="content">
+    <div class="header">
+        <div>
+            <h1 id="game-title" onclick="toggleAdmin()">SPACE MARKET <span style="font-size: 14px; opacity: 0.6;">v2.1 FINAL</span></h1>
+            <div class="stats-bar">
+                <span>Кейсов: <b id="stat-cases">0</b></span>
+                <span>Инвентарь: <b id="stat-inv-val">0</b>$</span>
+                <span>Best: <b id="stat-best">-</b></span>
+            </div>
+        </div>
+        <div style="text-align: right;">
+            💰 <span id="balance">0</span>$ <br>
+            <span class="lvl-badge">LVL <span id="lvl">1</span></span>
+        </div>
     </div>
-  </div>
 
-  <!-- Tab 1: Игры -->
-  <div id="games" class="tab-content active">
-    <div class="game-card">
-      <div class="game-title">🎯 Рулетка StandFade</div>
-      <p style="color: #a0a5b8; font-size: 13px;">Крути барабан и выбивай редкие скины!</p>
-      <button class="btn-play">Играть</button>
+    <div class="case-section" id="main-case-area">
+        <div class="roulette-window">
+            <div class="pointer"></div>
+            <div id="track" class="track"></div>
+        </div>
+        <div style="display: flex; justify-content: center; flex-wrap: wrap;">
+            <button onclick="startSpin('standard')">СТАНДАРТ ($250)</button>
+            <button onclick="startSpin('knife')" style="background: var(--gold); color: #000;">KNIFE CASE ($5000)</button>
+            <button onclick="getDailyBonus()">БОНУС 24ч</button>
+            <button style="border:1px solid var(--legendary); background:none; color:var(--legendary)" onclick="togglePromoUI()">ПРОМОКОД</button>
+        </div>
+        <div id="promo-ui" class="hidden" style="margin-top:15px;">
+            <input type="text" id="user-promo-input" style="width:200px" placeholder="Код...">
+            <button onclick="checkPromo()">OK</button>
+        </div>
     </div>
-    <div class="game-card">
-      <div class="game-title">💣 Мины</div>
-      <p style="color: #a0a5b8; font-size: 13px;">Открывай ячейки и забирай иксы.</p>
-      <button class="btn-play">Играть</button>
+
+    <div class="grid">
+        <div class="box"><h3>МАРКЕТ (ВСЕ)</h3><div id="market-list"></div></div>
+        <div class="box"><h3>ИНВЕНТАРЬ</h3><div id="inv-list"></div></div>
+        <div class="box">
+            <h3>КОНТРАКТ</h3>
+            <button id="craft-btn" onclick="doContract()" style="width:100%" disabled>ОБМЕН (0/5)</button>
+        </div>
     </div>
-  </div>
+</div>
 
-  <!-- Tab 2: Инвентарь -->
-  <div id="inventory" class="tab-content">
-    <h3>Твой инвентарь</h3>
-    <p style="color: #707589; margin-top: 10px;">У тебя пока нет предметов.</p>
-  </div>
+<script>
+    // ИЗМЕНИ ЭТУ СТРОКУ, ЧТОБЫ АВТОМАТИЧЕСКИ СБРОСИТЬ ВСЕМ ИГРОКАМ ДАННЫЕ
+    const CURRENT_VERSION = "2.1_STABLE_V1"; 
 
-  <!-- Tab 3: Профиль -->
-  <div id="profile" class="tab-content">
-    <h3>Профиль игрока</h3>
-    <p style="color: #707589; margin-top: 10px;">ID: 94820491</p>
-  </div>
-
-  <!-- Bottom Navigation -->
-  <nav class="bottom-nav">
-    <button class="nav-item active" onclick="switchTab('games', this)">
-      <svg viewBox="0 0 24 24"><path d="M21 6H3c-1.1 0-2 .9-2 2v8c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm-10 7H8v3H6v-3H3v-2h3V8h2v3h3v2zm4.5 2c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm3-3c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5z"/></svg>
-      Игры
-    </button>
-    <button class="nav-item" onclick="switchTab('inventory', this)">
-      <svg viewBox="0 0 24 24"><path d="M20 6h-4V4c0-1.11-.89-2-2-2h-4c-1.11 0-2 .89-2 2v2H4c-1.11 0-1.99.89-1.99 2L2 19c0 1.11.89 2 2 2h16c1.11 0 2-.89 2-2V8c0-1.11-.89-2-2-2zm-6 0h-4V4h4v2z"/></svg>
-      Инвентарь
-    </button>
-    <button class="nav-item" onclick="switchTab('profile', this)">
-      <svg viewBox="0 0 24 24"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>
-      Профиль
-    </button>
-  </nav>
-
-  <script>
-    const tg = window.Telegram.WebApp;
-    tg.expand(); // Разворачивает Mini App на весь экран
-
-    function switchTab(tabId, el) {
-      document.querySelectorAll('.tab-content').forEach(tab => tab.classList.remove('active'));
-      document.querySelectorAll('.nav-item').forEach(btn => btn.classList.remove('active'));
-      
-      document.getElementById(tabId).classList.add('active');
-      el.classList.add('active');
+    if (localStorage.getItem('sp_ver') !== CURRENT_VERSION) {
+        localStorage.clear();
+        localStorage.setItem('sp_ver', CURRENT_VERSION);
     }
-  </script>
+
+    const allItems = [
+        { id: 1, name: "P250 | Sand Dune", price: 10, rarity: "rare", chance: 80 },
+        { id: 2, name: "Glock-18 | Moonrise", price: 150, rarity: "rare", chance: 30 },
+        { id: 3, name: "Desert Eagle | Mecha", price: 750, rarity: "mythical", chance: 15 },
+        { id: 4, name: "AK-47 | Redline", price: 1200, rarity: "mythical", chance: 12 },
+        { id: 5, name: "M4A1-S | Printstream", price: 3800, rarity: "legendary", chance: 6 },
+        { id: 6, name: "M4A4 | Temukau", price: 4200, rarity: "legendary", chance: 5 },
+        { id: 7, name: "AWP | Graphite", price: 5500, rarity: "legendary", chance: 3 },
+        { id: 8, name: "AWP | Gungnir", price: 18000, rarity: "ancient", chance: 0.1 },
+        { id: 9, name: "AK-47 | Wild Lotus", price: 15000, rarity: "ancient", chance: 0.15 },
+        { id: 10, name: "AWP | Dragon Lore", price: 32000, rarity: "ancient", chance: 0.05 },
+        { id: 11, name: "Karambit | Doppler", price: 4850, rarity: "gold", chance: 0.8 },
+        { id: 12, name: "Butterfly | Marble Fade", price: 12500, rarity: "gold", chance: 0.02 },
+        { id: 13, name: "M9 Bayonet | Lore", price: 5150, rarity: "gold", chance: 0.1 },
+        { id: 14, name: "Sport Gloves | Vice", price: 4600, rarity: "gold", chance: 0.9 }
+    ];
+
+    const rarityOrder = ["rare", "mythical", "legendary", "ancient", "gold"];
+    let balance = localStorage.getItem('sp_bal') !== null ? parseFloat(localStorage.getItem('sp_bal')) : 2500;
+    let xp = parseInt(localStorage.getItem('sp_xp')) || 0;
+    let inventory = JSON.parse(localStorage.getItem('sp_inv')) || [];
+    let stats = JSON.parse(localStorage.getItem('sp_stats')) || { cases: 0, best: "-" };
+    let customPromos = JSON.parse(localStorage.getItem('sp_promos')) || {"ADMIN": { type: "money", value: 100000 }};
+    let usedByMe = JSON.parse(localStorage.getItem('sp_used_by_me')) || [];
+    let lastBonus = localStorage.getItem('sp_bonus_time') || 0;
+    let selectedForCraft = [];
+    let isSpinning = false;
+
+    function save() {
+        localStorage.setItem('sp_bal', balance); localStorage.setItem('sp_xp', xp);
+        localStorage.setItem('sp_inv', JSON.stringify(inventory)); localStorage.setItem('sp_stats', JSON.stringify(stats));
+        localStorage.setItem('sp_promos', JSON.stringify(customPromos)); localStorage.setItem('sp_used_by_me', JSON.stringify(usedByMe));
+    }
+
+    // Частицы
+    const canvas = document.getElementById('particles-js'); const ctx = canvas.getContext('2d');
+    let particles = [];
+    function initP() { canvas.width = window.innerWidth; canvas.height = window.innerHeight; particles = []; for(let i=0; i<60; i++) particles.push({ x: Math.random()*canvas.width, y: Math.random()*canvas.height, s: Math.random()*2, v: Math.random()*0.2 }); }
+    function drawP() { ctx.clearRect(0,0,canvas.width, canvas.height); ctx.fillStyle = "#333"; particles.forEach(p => { ctx.beginPath(); ctx.arc(p.x, p.y, p.s, 0, Math.PI*2); ctx.fill(); p.y -= p.v; if(p.y < 0) p.y = canvas.height; }); requestAnimationFrame(drawP); }
+    initP(); drawP();
+
+    function updateUI() {
+        document.getElementById('balance').innerText = Math.floor(balance).toLocaleString();
+        document.getElementById('lvl').innerText = Math.floor(xp / 1000) + 1;
+        let invVal = inventory.reduce((sum, item) => sum + (item.basePrice * (item.isST ? 1.5 : 1)), 0);
+        document.getElementById('stat-cases').innerText = stats.cases;
+        document.getElementById('stat-inv-val').innerText = Math.floor(invVal).toLocaleString();
+        document.getElementById('stat-best').innerText = stats.best;
+        
+        const il = document.getElementById('inv-list'); il.innerHTML = '';
+        inventory.forEach((it, idx) => {
+            const sellPrice = Math.floor((it.basePrice * (it.isST ? 1.5 : 1)) * 0.9);
+            il.innerHTML += `<div class="item ${selectedForCraft.includes(idx)?'selected':''}" style="border-left-color:var(--${it.rarity})" onclick="toggleCraft(${idx})"><div>${it.isST?'<span class="st-tag">ST™</span> ':''}<b>${it.name}</b><br><span>$${sellPrice}</span></div><button onclick="sellItem(${idx}, event)" style="background:#ff4747; color:#fff; padding:5px 10px;">$</button></div>`;
+        });
+
+        const ml = document.getElementById('market-list'); ml.innerHTML = '';
+        allItems.forEach(i => { ml.innerHTML += `<div class="item" style="border-left-color:var(--${i.rarity})"><div><b>${i.name}</b><br><span>$${i.price.toLocaleString()}</span></div><button onclick="buyItem(${i.id})">BUY</button></div>`; });
+
+        document.getElementById('craft-btn').disabled = selectedForCraft.length !== 5;
+        document.getElementById('craft-btn').innerText = `ОБМЕН (${selectedForCraft.length}/5)`;
+        save();
+    }
+
+    function buyItem(id) {
+        const i = allItems.find(x => x.id === id);
+        if(balance >= i.price) { balance -= i.price; inventory.push({ ...i, basePrice: i.price, isST: false }); updateUI(); }
+    }
+
+    function startSpin(type) {
+        const cost = type === 'standard' ? 250 : 5000;
+        if(balance < cost || isSpinning) return;
+        balance -= cost; stats.cases++; isSpinning = true; updateUI();
+        const track = document.getElementById('track'); track.style.transition = 'none'; track.style.transform = 'translateX(0)';
+        let pool = type === 'standard' ? allItems.filter(i => i.price < 5000) : allItems.filter(i => i.rarity === 'gold' || i.rarity === 'ancient');
+        const totalChance = pool.reduce((s, i) => s + i.chance, 0);
+        let rnd = Math.random() * totalChance;
+        let winner = pool[0];
+        for (let item of pool) { if (rnd < item.chance) { winner = item; break; } rnd -= item.chance; }
+        let stChance = (type === 'knife') ? 0.02 : 0.1;
+        let isST = Math.random() < stChance && winner.rarity !== 'gold';
+        let spinList = []; for(let i=0; i<60; i++) spinList.push(i === 55 ? winner : pool[Math.floor(Math.random()*pool.length)]);
+        track.innerHTML = ''; 
+        spinList.forEach(i => track.innerHTML += `<div class="card ${i.rarity}"><b>${i.name.split('|')[1] || i.name}</b></div>`);
+        setTimeout(() => { 
+            track.style.transition = 'transform 4s cubic-bezier(0.1, 0, 0.1, 1)'; 
+            track.style.transform = `translateX(-${(55 * 140) - (document.getElementById('main-case-area').offsetWidth / 2) + 70}px)`; 
+        }, 50);
+        setTimeout(() => {
+            inventory.push({ ...winner, basePrice: winner.price, isST: isST });
+            if(winner.rarity === 'gold' || winner.price > 5000) stats.best = winner.name.split('|')[1];
+            isSpinning = false; updateUI();
+        }, 4100);
+    }
+
+    function doContract() {
+        if(selectedForCraft.length !== 5) return;
+        const items = selectedForCraft.map(idx => inventory[idx]);
+        const nextPool = allItems.filter(i => rarityOrder.indexOf(i.rarity) >= rarityOrder.indexOf(items[0].rarity));
+        const win = nextPool[Math.floor(Math.random() * nextPool.length)];
+        selectedForCraft.sort((a,b)=>b-a).forEach(i => inventory.splice(i, 1));
+        inventory.push({ ...win, basePrice: win.price, isST: Math.random() < 0.1 });
+        selectedForCraft = []; updateUI();
+    }
+
+    function toggleCraft(idx) { if(selectedForCraft.includes(idx)) selectedForCraft = selectedForCraft.filter(i => i!==idx); else if(selectedForCraft.length < 5) selectedForCraft.push(idx); updateUI(); }
+    function sellItem(idx, e) { e.stopPropagation(); let it = inventory[idx]; balance += Math.floor((it.basePrice * (it.isST ? 1.5 : 1)) * 0.9); inventory.splice(idx, 1); selectedForCraft = []; updateUI(); }
+    function getDailyBonus() { if (Date.now() - lastBonus > 86400000) { balance += 800; lastBonus = Date.now(); localStorage.setItem('sp_bonus_time', lastBonus); updateUI(); } else { alert("Жди!"); } }
+
+    function fullReset() { 
+        if(confirm("ПОЛНЫЙ СБРОС?")) { 
+            localStorage.clear(); 
+            location.reload(); 
+        } 
+    }
+
+    function createCustomPromo() {
+        const name = document.getElementById('new-code-name').value.trim().toUpperCase();
+        const type = document.getElementById('new-code-type').value;
+        const val = parseInt(document.getElementById('new-code-value').value) || 0;
+        if(!name) return;
+        customPromos[name] = { type: type, value: val };
+        alert("Код создан!");
+        save();
+    }
+
+    function checkPromo() {
+        const code = document.getElementById('user-promo-input').value.trim().toUpperCase();
+        if (customPromos[code] && !usedByMe.includes(code)) {
+            const p = customPromos[code];
+            if (p.type === 'money') balance += p.value;
+            else { const r = allItems[Math.floor(Math.random()*allItems.length)]; inventory.push({...r, basePrice: r.price}); }
+            usedByMe.push(code); updateUI();
+        }
+    }
+
+    function toggleAdmin() { document.getElementById('admin-panel').classList.toggle('hidden'); }
+    function togglePromoUI() { document.getElementById('promo-ui').classList.toggle('hidden'); }
+    
+    updateUI();
+</script>
 </body>
 </html>

@@ -21,6 +21,15 @@ SUPERADMIN_ID = 6624873620
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
+# --- ТЕКСТ ПРИВЕТСТВИЯ ---
+WELCOME_TEXT = (
+    "🎧 **Добро пожаловать в музыкальный бот!**\n\n"
+    "Здесь вы можете послушать эксклюзивные треки.\n\n"
+    "👤 **Создатель:** @beertimeold\n"
+    "📢 **Наш канал:** https://t.me/beertimeoldben\n\n"
+    "Выберите действие в меню ниже:"
+)
+
 # --- ФЕЙКОВЫЙ СЕРВЕР ДЛЯ ОБРАБОТКИ ПОРТА RENDER ---
 async def handle_ping(request):
     return web.Response(text="Bot is running!")
@@ -86,20 +95,21 @@ async def cmd_start(message: types.Message):
     conn.commit()
     conn.close()
 
-    welcome_text = (
-        "🎧 **Добро пожаловать в музыкальный бот!**\n\n"
-        "Здесь вы можете послушать эксклюзивные треки.\n\n"
-        "👤 **Создатель:** @beertimeold\n"
-        "📢 **Наш канал:** https://t.me/beertimeoldben\n\n"
-        "Выберите действие в меню ниже:"
-    )
-    await message.answer(welcome_text, parse_mode="Markdown", reply_markup=get_main_keyboard(message.from_user.id))
+    await message.answer(WELCOME_TEXT, parse_mode="Markdown", reply_markup=get_main_keyboard(message.from_user.id))
 
 @dp.callback_query(F.data == "main_menu")
 async def back_to_main(call: types.CallbackQuery, state: FSMContext):
     await state.clear()
-    await call.message.edit_text("Главное меню:", reply_markup=get_main_keyboard(call.from_user.id))
+    await call.message.edit_text(WELCOME_TEXT, parse_mode="Markdown", reply_markup=get_main_keyboard(call.from_user.id))
 
+# Удаление аудио-сообщения при нажатии «Назад»
+@dp.callback_query(F.data == "delete_and_back")
+async def delete_and_back(call: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await call.message.delete()
+    await call.message.answer(WELCOME_TEXT, parse_mode="Markdown", reply_markup=get_main_keyboard(call.from_user.id))
+
+# --- ПРОСЛУШИВАНИЕ ТРЕКОВ ---
 @dp.callback_query(F.data == "list_tracks")
 async def show_tracks(call: types.CallbackQuery):
     conn = sqlite3.connect('music_bot.db')
@@ -131,11 +141,18 @@ async def play_track(call: types.CallbackQuery):
     if track:
         title, file_id = track
         caption = f"🎵 **{title}**\n\n👤 Автор: @beertimeold\n📢 Канал: https://t.me/beertimeoldben"
-        await call.message.answer_audio(audio=file_id, caption=caption, parse_mode="Markdown")
+        
+        # Кнопка Назад под аудиосообщением
+        track_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="delete_and_back")]
+        ])
+        
+        await call.message.answer_audio(audio=file_id, caption=caption, parse_mode="Markdown", reply_markup=track_kb)
         await call.answer()
     else:
         await call.answer("Трек не найден.", show_alert=True)
 
+# --- АДМИН ПАНЕЛЬ ---
 @dp.callback_query(F.data == "admin_panel")
 async def admin_panel(call: types.CallbackQuery):
     if not is_admin(call.from_user.id):
@@ -250,10 +267,10 @@ async def process_broadcast(message: types.Message, state: FSMContext):
 async def main():
     init_db()
     
-    # Запускаем локальный веб-сервер, чтобы Render прошел проверку по портам
+    # Запуск фейкового сервера для прохождения проверок порта
     await start_fake_server()
     
-    # Сбрасываем активные вебхуки и зависшие обновления
+    # Сброс вебхуков
     await bot.delete_webhook(drop_pending_updates=True)
     
     await dp.start_polling(bot)

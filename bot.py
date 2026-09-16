@@ -2,37 +2,45 @@ import os
 import asyncio
 import sqlite3
 import logging
+from aiohttp import web
 from aiogram import Bot, Dispatcher, F, types
-from aiogram.filters import CommandStart, Command
+from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 
-# Получаем токен из Environment Variables на Render
+# Токен берется из Environment Variables на Render
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# Твой Telegram ID как главный админ
+# Твой Telegram ID
 SUPERADMIN_ID = 6624873620
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
+# --- ФЕЙКОВЫЙ СЕРВЕР ДЛЯ ОБРАБОТКИ ПОРТА RENDER ---
+async def handle_ping(request):
+    return web.Response(text="Bot is running!")
+
+async def start_fake_server():
+    app = web.Application()
+    app.router.add_get('/', handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv("PORT", 8080))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+
 # --- БАЗА ДАННЫХ ---
 def init_db():
     conn = sqlite3.connect('music_bot.db')
     cursor = conn.cursor()
-    # Таблица пользователей
     cursor.execute('''CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY)''')
-    # Таблица админов
     cursor.execute('''CREATE TABLE IF NOT EXISTS admins (user_id INTEGER PRIMARY KEY)''')
-    # Таблица треков
     cursor.execute('''CREATE TABLE IF NOT EXISTS tracks (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, file_id TEXT)''')
-    
-    # Добавляем тебя как главного админа по умолчанию
     cursor.execute('INSERT OR IGNORE INTO admins (user_id) VALUES (?)', (SUPERADMIN_ID,))
     conn.commit()
     conn.close()
@@ -55,9 +63,7 @@ class AdminStates(StatesGroup):
 
 # --- КЛАВИАТУРЫ ---
 def get_main_keyboard(user_id: int):
-    kb = [
-        [InlineKeyboardButton(text="🎵 Треки", callback_data="list_tracks")]
-    ]
+    kb = [[InlineKeyboardButton(text="🎵 Треки", callback_data="list_tracks")]]
     if is_admin(user_id):
         kb.append([InlineKeyboardButton(text="⚙️ Админ-панель", callback_data="admin_panel")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
@@ -72,10 +78,8 @@ def get_admin_keyboard():
     ])
 
 # --- ХЕНДЛЕРЫ ---
-
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
-    # Регистрируем пользователя для рассылки
     conn = sqlite3.connect('music_bot.db')
     cursor = conn.cursor()
     cursor.execute('INSERT OR IGNORE INTO users (user_id) VALUES (?)', (message.from_user.id,))
@@ -96,7 +100,6 @@ async def back_to_main(call: types.CallbackQuery, state: FSMContext):
     await state.clear()
     await call.message.edit_text("Главное меню:", reply_markup=get_main_keyboard(call.from_user.id))
 
-# --- ПРОСЛУШИВАНИЕ ТРЕКОВ ---
 @dp.callback_query(F.data == "list_tracks")
 async def show_tracks(call: types.CallbackQuery):
     conn = sqlite3.connect('music_bot.db')
@@ -133,15 +136,12 @@ async def play_track(call: types.CallbackQuery):
     else:
         await call.answer("Трек не найден.", show_alert=True)
 
-# --- АДМИН ПАНЕЛЬ ---
 @dp.callback_query(F.data == "admin_panel")
 async def admin_panel(call: types.CallbackQuery):
     if not is_admin(call.from_user.id):
         return await call.answer("У вас нет прав!", show_alert=True)
-    
     await call.message.edit_text("⚙️ **Административная панель:**", parse_mode="Markdown", reply_markup=get_admin_keyboard())
 
-# Добавление трека
 @dp.callback_query(F.data == "add_track")
 async def add_track_start(call: types.CallbackQuery, state: FSMContext):
     if not is_admin(call.from_user.id): return
@@ -170,7 +170,6 @@ async def process_track_file(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer(f"✅ Трек **«{title}»** успешно опубликован!", parse_mode="Markdown", reply_markup=get_admin_keyboard())
 
-# Добавление админа
 @dp.callback_query(F.data == "add_admin_start")
 async def add_admin_start(call: types.CallbackQuery, state: FSMContext):
     if not is_admin(call.from_user.id): return
@@ -193,7 +192,6 @@ async def process_add_admin(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer(f"✅ Пользователь `{new_admin_id}` назначен админом!", parse_mode="Markdown", reply_markup=get_admin_keyboard())
 
-# Удаление админа
 @dp.callback_query(F.data == "del_admin_start")
 async def del_admin_start(call: types.CallbackQuery, state: FSMContext):
     if not is_admin(call.from_user.id): return
@@ -220,7 +218,6 @@ async def process_del_admin(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer(f"✅ Пользователь `{admin_id}` удален из админов!", parse_mode="Markdown", reply_markup=get_admin_keyboard())
 
-# Рассылка
 @dp.callback_query(F.data == "start_broadcast")
 async def broadcast_start(call: types.CallbackQuery, state: FSMContext):
     if not is_admin(call.from_user.id): return
@@ -242,9 +239,9 @@ async def process_broadcast(message: types.Message, state: FSMContext):
         try:
             await bot.send_message(chat_id=user[0], text=message.text)
             count += 1
-            await asyncio.sleep(0.05)  # Защита от лимитов Telegram
+            await asyncio.sleep(0.05)
         except Exception:
-            pass  # Пользователь заблокировал бота
+            pass
 
     await state.clear()
     await message.answer(f"✅ Рассылка завершена! Получили сообщение: {count} пользователей.", reply_markup=get_admin_keyboard())
@@ -252,6 +249,13 @@ async def process_broadcast(message: types.Message, state: FSMContext):
 # --- ЗАПУСК ---
 async def main():
     init_db()
+    
+    # Запускаем локальный веб-сервер, чтобы Render прошел проверку по портам
+    await start_fake_server()
+    
+    # Сбрасываем активные вебхуки и зависшие обновления
+    await bot.delete_webhook(drop_pending_updates=True)
+    
     await dp.start_polling(bot)
 
 if __name__ == "__main__":

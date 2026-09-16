@@ -1,549 +1,256 @@
-import os
-import json
-import time
-from flask import Flask, request
-import telebot
-from telebot import types
+import asyncio
+import sqlite3
+import logging
+from aiogram import Bot, Dispatcher, F, types
+from aiogram.filters import CommandStart, Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# Инициализация Flask и Бота
-TOKEN = os.environ.get('TELEGRAM_TOKEN')
-bot = telebot.TeleBot(TOKEN)
-app = Flask(__name__)
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
 
-# Файл для вечного хранения статистики, админов и банов
-STATS_FILE = "/tmp/stats.json"
+# Укажи токен своего бота
+BOT_TOKEN = "ТВОЙ_ТОКЕН_БОТА"
+# Ваш Telegram ID (первоначальный суперадмин)
+SUPERADMIN_ID = 123456789  # Замени на свой real ID!
 
-# Твой личный Telegram ID (Главный админ / Создатель)
-CREATOR_ID = 6624873620
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher(storage=MemoryStorage())
 
-# Очередь поиска по хэштегам: {'#игры': [id1, id2], 'общий': [id3, id4]}
-search_queues = {'общий': []}
-
-# Активные диалоги: {user_id: partner_id}
-active_chats = {}
-
-# Глобальные словари
-user_stats = {}
-last_partners = {}
-temporary_admins = {} # {admin_id: timestamp_expire}
-banned_users = []     # Список забаненных ID пользователей
-states = {}           # {user_id: {'step': '...', 'target_id': ...}}
-
-# --- ФУНКЦИИ ДЛЯ РАБОТЫ С БАЗОЙ ДАННЫХ (JSON) ---
-
-def load_stats():
-    """Загрузка всей базы данных при старте бота"""
-    global user_stats, temporary_admins, banned_users
-    if os.path.exists(STATS_FILE):
-        try:
-            with open(STATS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                raw_stats = data.get("user_stats", {})
-                user_stats = {int(k): v for k, v in raw_stats.items()}
-                
-                raw_admins = data.get("temporary_admins", {})
-                temporary_admins = {int(k): v for k, v in raw_admins.items()}
-                
-                banned_users = data.get("banned_users", [])
-        except Exception as e:
-            print(f"Ошибка загрузки базы данных: {e}")
-    check_expired_admins()
-
-def save_stats():
-    """Сохранение всей базы данных при любых изменениях"""
-    try:
-        with open(STATS_FILE, "w", encoding="utf-8") as f:
-            full_data = {
-                "user_stats": user_stats,
-                "temporary_admins": temporary_admins,
-                "banned_users": banned_users
-            }
-            json.dump(full_data, f, ensure_ascii=False, indent=4)
-    except Exception as e:
-        print(f"Ошибка сохранения базы данных: {e}")
-
-def check_expired_admins():
-    """Автоматическое удаление админов, у которых вышло время"""
-    global temporary_admins
-    current_time = time.time()
-    expired = [uid for uid, expire_time in temporary_admins.items() if current_time > expire_time]
+# --- БАЗА ДАННЫХ ---
+def init_db():
+    conn = sqlite3.connect('music_bot.db')
+    cursor = conn.cursor()
+    # Таблица пользователей
+    cursor.execute('''CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY)''')
+    # Таблица админов
+    cursor.execute('''CREATE TABLE IF NOT EXISTS admins (user_id INTEGER PRIMARY KEY)''')
+    # Таблица треков
+    cursor.execute('''CREATE TABLE IF NOT EXISTS tracks (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, file_id TEXT)''')
     
-    if expired:
-        for uid in expired:
-            del temporary_admins[uid]
-            try:
-                bot.send_message(uid, "🛑 Срок действия ваших админ-прав истек.")
-            except:
-                pass
-        save_stats()
+    # Добавляем суперадмина по умолчанию
+    cursor.execute('INSERT OR IGNORE INTO admins (user_id) VALUES (?)', (SUPERADMIN_ID,))
+    conn.commit()
+    conn.close()
 
-def is_admin(user_id):
-    check_expired_admins()
-    return user_id == CREATOR_ID or user_id in temporary_admins
+def is_admin(user_id: int) -> bool:
+    conn = sqlite3.connect('music_bot.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT user_id FROM admins WHERE user_id = ?', (user_id,))
+    res = cursor.fetchone()
+    conn.close()
+    return res is not None
 
-def init_user_stats(user_id):
-    if user_id not in user_stats:
-        user_stats[user_id] = {'chats_count': 0, 'likes': 0, 'dislikes': 0}
-        save_stats()
-
-def get_user_queue_category(user_id):
-    """Поиск в какой очереди сейчас находится пользователь"""
-    for cat, q in search_queues.items():
-        if user_id in q:
-            return cat
-    return None
-
-def remove_from_all_queues(user_id):
-    """Удаление пользователя из всех очередей поиска"""
-    for cat in search_queues.keys():
-        if user_id in search_queues[cat]:
-            search_queues[cat].remove(user_id)
-
-load_stats()
-
+# --- FSM (СОСТОЯНИЯ) ---
+class AdminStates(StatesGroup):
+    add_admin = State()
+    delete_admin = State()
+    track_title = State()
+    track_file = State()
+    broadcast_msg = State()
 
 # --- КЛАВИАТУРЫ ---
-
-def get_main_menu():
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add(types.KeyboardButton("🔍 Искать собеседника"))
-    markup.add(types.KeyboardButton("📊 Мой профиль"))
-    return markup
-
-def get_search_type_menu():
-    """Выбор типа поиска"""
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add(types.KeyboardButton("🌐 Искать кого угодно"), types.KeyboardButton("🏷 Поиск по интересам"))
-    markup.add(types.KeyboardButton("🔄 Главное меню"))
-    return markup
-
-def get_search_menu():
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add(types.KeyboardButton("❌ Отменить поиск"))
-    return markup
-
-def get_chat_menu():
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add(types.KeyboardButton("🛑 Завершить диалог"))
-    markup.add(types.KeyboardButton("🚨 Пожаловаться"))
-    return markup
-
-def get_rating_menu():
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-    markup.add(types.KeyboardButton("👍 Понравился"), types.KeyboardButton("👎 Скучный"))
-    markup.add(types.KeyboardButton("🔄 Главное меню"))
-    return markup
-
-def get_admin_menu(user_id):
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("📊 Статистика и Онлайн", callback_data="admin_stats"))
-    markup.add(types.InlineKeyboardButton("🔍 Инфо о юзере (Пробить)", callback_data="admin_info"))
-    markup.add(types.InlineKeyboardButton("📢 Сделать рассылку (Реклама)", callback_data="admin_broadcast"))
-    markup.add(types.InlineKeyboardButton("🔨 Забанить юзера", callback_data="admin_ban"))
-    markup.add(types.InlineKeyboardButton("🔓 Разбанить юзера", callback_data="admin_unban"))
-    
-    if user_id == CREATOR_ID:
-        markup.add(types.InlineKeyboardButton("➕ Назначить временного админа", callback_data="admin_add"))
-        markup.add(types.InlineKeyboardButton("❌ Разжаловать админа", callback_data="admin_remove"))
-    return markup
-
-
-# --- СЕКРЕТНАЯ АДМИН-ПАНЕЛЬ ---
-
-@bot.message_handler(commands=['secretpanel'])
-def admin_panel(message):
-    user_id = message.chat.id
+def get_main_keyboard(user_id: int):
+    kb = [
+        [InlineKeyboardButton(text="🎵 Треки", callback_data="list_tracks")]
+    ]
     if is_admin(user_id):
-        bot.send_message(user_id, "⚙️ *Добро пожаловать в секретную админ-панель:*", parse_mode="Markdown", reply_markup=get_admin_menu(user_id))
-    else:
-        bot.send_message(user_id, "У вас нет активного диалога. Нажмите кнопку ниже.", reply_markup=get_main_menu())
+        kb.append([InlineKeyboardButton(text="⚙️ Админ-панель", callback_data="admin_panel")])
+    return InlineKeyboardMarkup(inline_keyboard=kb)
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('admin_'))
-def admin_callbacks(call):
-    user_id = call.message.chat.id
-    if not is_admin(user_id):
-        return
+def get_admin_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Запостить трек", callback_data="add_track")],
+        [InlineKeyboardButton(text="👑 Добавить админа", callback_data="add_admin_start")],
+        [InlineKeyboardButton(text="❌ Удалить админа", callback_data="del_admin_start")],
+        [InlineKeyboardButton(text="📢 Рассылка", callback_data="start_broadcast")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
+    ])
 
-    if call.data == "admin_stats":
-        total_users = len(user_stats)
-        in_queue = sum(len(q) for q in search_queues.values())
-        in_chat = len(active_chats) // 2
-        
-        stats_msg = (
-            "📊 *АКТУАЛЬНАЯ СТАТИСТИКА БОТА*\n\n"
-            f"👥 Всего юзеров в базе (JSON): {total_users}\n"
-            f"⏳ Людей в поиске (все очереди): {in_queue}\n"
-            f"💬 Общаются прямо сейчас (Онлайн): {in_chat} пар(ы)\n"
-            f"🚫 Забаненных пользователей: {len(banned_users)}\n"
-            f"👑 Активных временных админов: {len(temporary_admins)}"
-        )
-        bot.send_message(user_id, stats_msg, parse_mode="Markdown", reply_markup=get_admin_menu(user_id))
+# --- ХЕНДЛЕРЫ ---
 
-    elif call.data == "admin_info":
-        states[user_id] = {'step': "waiting_for_info_id"}
-        bot.send_message(user_id, "🔍 Введите Telegram ID пользователя, чтобы пробить инфо:")
+@dp.message(CommandStart())
+async def cmd_start(message: types.Message):
+    # Регистрируем пользователя для рассылки
+    conn = sqlite3.connect('music_bot.db')
+    cursor = conn.cursor()
+    cursor.execute('INSERT OR IGNORE INTO users (user_id) VALUES (?)', (message.from_user.id,))
+    conn.commit()
+    conn.close()
 
-    elif call.data == "admin_broadcast":
-        states[user_id] = {'step': "waiting_for_broadcast_text"}
-        bot.send_message(user_id, "📢 Введите текст рекламы/сообщения, которое увидят ВСЕ пользователи бота:")
-
-    elif call.data == "admin_ban":
-        states[user_id] = {'step': "waiting_for_ban_id"}
-        bot.send_message(user_id, "🔨 Введите Telegram ID нарушителя, которого нужно забанить:")
-
-    elif call.data == "admin_unban":
-        states[user_id] = {'step': "waiting_for_unban_id"}
-        bot.send_message(user_id, "🔓 Введите Telegram ID пользователя для разблокировки:")
-
-    elif call.data == "admin_add":
-        if user_id != CREATOR_ID: return
-        states[user_id] = {'step': "waiting_for_admin_id"}
-        bot.send_message(user_id, "➕ Введите Telegram ID пользователя, которого хотите сделать админом:")
-
-    elif call.data == "admin_remove":
-        if user_id != CREATOR_ID: return
-        if not temporary_admins:
-            bot.send_message(user_id, "Список дополнительных админов сейчас пуст.", reply_markup=get_admin_menu(user_id))
-            return
-        msg = "📋 *Список текущих админов:*\n"
-        for adv_id, expire in temporary_admins.items():
-            remains = int((expire - time.time()) / 3600)
-            msg += f"• ID: `{adv_id}` (Осталось: ~{remains} ч.)\n"
-        msg += "\nВведите ID админа, которого хотите убрать:"
-        states[user_id] = {'step': "waiting_for_remove_id"}
-        bot.send_message(user_id, msg, parse_mode="Markdown")
-
-
-# --- ОБРАБОТЧИКИ ОБЫЧНЫХ КОМАНД И КНОПОК ---
-
-@bot.message_handler(commands=['start'])
-def start_command(message):
-    user_id = message.chat.id
-    if user_id in banned_users:
-        bot.send_message(user_id, "❌ Вы заблокированы администрацией бота за нарушение правил.")
-        return
-        
-    init_user_stats(user_id)
     welcome_text = (
-        "👋 Привет в Анонимном Чат-Рулетке!\n\n"
-        "Здесь ты можешь найти случайного собеседника по интересам или просто поболтать.\n"
-        "Твой профиль сохраняется автоматически!"
+        "🎧 **Добро пожаловать в музыкальный бот!**\n\n"
+        "Здесь вы можете послушать эксклюзивные треки.\n\n"
+        "👤 **Создатель:** @beertimeold\n"
+        "📢 **Наш канал:** https://t.me/beertimeoldben\n\n"
+        "Выберите действие в меню ниже:"
     )
-    bot.send_message(user_id, welcome_text, reply_markup=get_main_menu())
+    await message.answer(welcome_text, parse_mode="Markdown", reply_markup=get_main_keyboard(message.from_user.id))
 
-@bot.message_handler(func=lambda message: message.text == "📊 Мой профиль")
-def show_profile(message):
-    user_id = message.chat.id
-    if user_id in banned_users: return
-    init_user_stats(user_id)
-    
-    stats = user_stats[user_id]
-    chats = stats['chats_count']
-    likes = stats['likes']
-    dislikes = stats['dislikes']
-    karma = likes - dislikes
-    
-    profile_text = (
-        "📊 *Ваш профиль в Чат-Рулетке*\n\n"
-        f"🗣 Всего собеседников: {chats}\n"
-        f"❤️ Лайки: {likes}\n"
-        f"💩 Дизлайки: {dislikes}\n"
-        f"✨ Репутация (Карма): {karma}\n"
-    )
-    bot.send_message(user_id, profile_text, parse_mode="Markdown", reply_markup=get_main_menu())
+@dp.callback_query(F.data == "main_menu")
+async def back_to_main(call: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await call.message.edit_text("Главное меню:", reply_markup=get_main_keyboard(call.from_user.id))
 
-@bot.message_handler(func=lambda message: message.text in ["🔍 Искать собеседника", "🔄 Главное меню"])
-def choose_search_type(message):
-    user_id = message.chat.id
-    if user_id in banned_users: return
-    
-    if user_id in active_chats:
-        bot.send_message(user_id, "Вы уже находитесь в диалоге!", reply_markup=get_chat_menu())
+# --- ПРОСЛУШИВАНИЕ ТРЕКОВ ---
+@dp.callback_query(F.data == "list_tracks")
+async def show_tracks(call: types.CallbackQuery):
+    conn = sqlite3.connect('music_bot.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT id, title FROM tracks')
+    tracks = cursor.fetchall()
+    conn.close()
+
+    if not tracks:
+        await call.answer("❌ Треков пока нет!", show_alert=True)
         return
-    if get_user_queue_category(user_id):
-        bot.send_message(user_id, "Вы уже ищете собеседника.", reply_markup=get_search_menu())
-        return
-        
-    bot.send_message(user_id, "Выберите режим поиска собеседника:", reply_markup=get_search_type_menu())
 
-@bot.message_handler(func=lambda message: message.text == "🌐 Искать кого угодно")
-def general_search(message):
-    user_id = message.chat.id
-    if user_id in banned_users or user_id in active_chats or get_user_queue_category(user_id): return
+    kb = []
+    for track_id, title in tracks:
+        kb.append([InlineKeyboardButton(text=f"🎶 {title}", callback_data=f"play_{track_id}")])
+    kb.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")])
+
+    await call.message.edit_text("🎼 **Выберите трек для прослушивания:**", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+@dp.callback_query(F.data.startswith("play_"))
+async def play_track(call: types.CallbackQuery):
+    track_id = int(call.data.split("_")[1])
+    conn = sqlite3.connect('music_bot.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT title, file_id FROM tracks WHERE id = ?', (track_id,))
+    track = cursor.fetchone()
+    conn.close()
+
+    if track:
+        title, file_id = track
+        caption = f"🎵 **{title}**\n\n👤 Автор: @beertimeold\n📢 Канал: https://t.me/beertimeoldben"
+        await call.message.answer_audio(audio=file_id, caption=caption, parse_mode="Markdown")
+        await call.answer()
+    else:
+        await call.answer("Трек не найден.", show_alert=True)
+
+# --- АДМИН ПАНЕЛЬ ---
+@dp.callback_query(F.data == "admin_panel")
+async def admin_panel(call: types.CallbackQuery):
+    if not is_admin(call.from_user.id):
+        return await call.answer("У вас нет прав!", show_alert=True)
     
-    execute_search(user_id, 'общий')
+    await call.message.edit_text("⚙️ **Административная панель:**", parse_mode="Markdown", reply_markup=get_admin_keyboard())
 
-@bot.message_handler(func=lambda message: message.text == "🏷 Поиск по интересам")
-def interest_search(message):
-    user_id = message.chat.id
-    if user_id in banned_users or user_id in active_chats or get_user_queue_category(user_id): return
+# Добавление трека
+@dp.callback_query(F.data == "add_track")
+async def add_track_start(call: types.CallbackQuery, state: FSMContext):
+    if not is_admin(call.from_user.id): return
+    await state.set_state(AdminStates.track_title)
+    await call.message.answer("Введите название для нового трека:")
+    await call.answer()
+
+@dp.message(AdminStates.track_title)
+async def process_track_title(message: types.Message, state: FSMContext):
+    await state.update_data(title=message.text)
+    await state.set_state(AdminStates.track_file)
+    await message.answer("Отправьте аудиофайл (трек):")
+
+@dp.message(AdminStates.track_file, F.audio)
+async def process_track_file(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    title = data['title']
+    file_id = message.audio.file_id
+
+    conn = sqlite3.connect('music_bot.db')
+    cursor = conn.cursor()
+    cursor.execute('INSERT INTO tracks (title, file_id) VALUES (?, ?)', (title, file_id))
+    conn.commit()
+    conn.close()
+
+    await state.clear()
+    await message.answer(f"✅ Трек **«{title}»** успешно опубликован!", parse_mode="Markdown", reply_markup=get_admin_keyboard())
+
+# Добавление админа
+@dp.callback_query(F.data == "add_admin_start")
+async def add_admin_start(call: types.CallbackQuery, state: FSMContext):
+    if not is_admin(call.from_user.id): return
+    await state.set_state(AdminStates.add_admin)
+    await call.message.answer("Пришлите **ID пользователя**, которого хотите сделать админом:")
+    await call.answer()
+
+@dp.message(AdminStates.add_admin)
+async def process_add_admin(message: types.Message, state: FSMContext):
+    if not message.text.isdigit():
+        return await message.answer("ID должен состоять только из цифр. Попробуйте еще раз:")
     
-    states[user_id] = {'step': 'waiting_for_hashtag'}
-    bot.send_message(user_id, "📝 Введите ключевое слово или хэштег того, что хотите обсудить\n_(например: #игры, #аниме, #кодинг, #музыка или просто слово):_")
+    new_admin_id = int(message.text)
+    conn = sqlite3.connect('music_bot.db')
+    cursor = conn.cursor()
+    cursor.execute('INSERT OR IGNORE INTO admins (user_id) VALUES (?)', (new_admin_id,))
+    conn.commit()
+    conn.close()
 
-def execute_search(user_id, category):
-    init_user_stats(user_id)
+    await state.clear()
+    await message.answer(f"✅ Пользователь `{new_admin_id}` назначен админом!", parse_mode="Markdown", reply_markup=get_admin_keyboard())
+
+# Удаление админа
+@dp.callback_query(F.data == "del_admin_start")
+async def del_admin_start(call: types.CallbackQuery, state: FSMContext):
+    if not is_admin(call.from_user.id): return
+    await state.set_state(AdminStates.delete_admin)
+    await call.message.answer("Пришлите **ID пользователя**, которого нужно удалить из админов:")
+    await call.answer()
+
+@dp.message(AdminStates.delete_admin)
+async def process_del_admin(message: types.Message, state: FSMContext):
+    if not message.text.isdigit():
+        return await message.answer("ID должен состоять только из цифр. Попробуйте еще раз:")
     
-    if category not in search_queues:
-        search_queues[category] = []
-        
-    if search_queues[category]:
-        partner_id = search_queues[category].pop(0)
-        active_chats[user_id] = partner_id
-        active_chats[partner_id] = user_id
-        
-        user_stats[user_id]['chats_count'] += 1
-        user_stats[partner_id]['chats_count'] += 1
-        save_stats()
-        
-        last_partners[user_id] = partner_id
-        last_partners[partner_id] = user_id
-        
-        match_msg = f"🎉 Собеседник найден! Тема диалога: *{category}*.\nПриятного общения!"
-        bot.send_message(user_id, match_msg, parse_mode="Markdown", reply_markup=get_chat_menu())
-        bot.send_message(partner_id, match_msg, parse_mode="Markdown", reply_markup=get_chat_menu())
-    else:
-        search_queues[category].append(user_id)
-        bot.send_message(user_id, f"🔍 Ищу собеседника по теме *{category}*... Пожалуйста, подождите.", parse_mode="Markdown", reply_markup=get_search_menu())
+    admin_id = int(message.text)
+    if admin_id == SUPERADMIN_ID:
+        await state.clear()
+        return await message.answer("❌ Нельзя удалить главного админа!", reply_markup=get_admin_keyboard())
 
-@bot.message_handler(func=lambda message: message.text == "❌ Отменить поиск")
-def cancel_search(message):
-    user_id = message.chat.id
-    category = get_user_queue_category(user_id)
-    if category:
-        remove_from_all_queues(user_id)
-        bot.send_message(user_id, "❌ Поиск отменен.", reply_markup=get_main_menu())
-    else:
-        bot.send_message(user_id, "Вы не находились в поиске.", reply_markup=get_main_menu())
+    conn = sqlite3.connect('music_bot.db')
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM admins WHERE user_id = ?', (admin_id,))
+    conn.commit()
+    conn.close()
 
-@bot.message_handler(func=lambda message: message.text == "🛑 Завершить диалог")
-def stop_chat(message):
-    user_id = message.chat.id
-    if user_id in active_chats:
-        partner_id = active_chats[user_id]
-        del active_chats[user_id]
-        if partner_id in active_chats:
-            del active_chats[partner_id]
-            
-        bot.send_message(user_id, "🛑 Вы завершили диалог. Оцените собеседника:", reply_markup=get_rating_menu())
-        bot.send_message(partner_id, "🛑 Собеседник завершил диалог. Оцените собеседника:", reply_markup=get_rating_menu())
-    else:
-        bot.send_message(user_id, "Вы не находитесь в диалоге.", reply_markup=get_main_menu())
+    await state.clear()
+    await message.answer(f"✅ Пользователь `{admin_id}` удален из админов!", parse_mode="Markdown", reply_markup=get_admin_keyboard())
 
-@bot.message_handler(func=lambda message: message.text == "🚨 Пожаловаться")
-def report_user(message):
-    user_id = message.chat.id
-    if user_id in active_chats:
-        partner_id = active_chats[user_id]
-        report_text = f"🚨 *ПОСТУПИЛА ЖАЛОБА!*\n\nПользователь `{user_id}` пожаловался на собеседника: `{partner_id}`."
-        try: bot.send_message(CREATOR_ID, report_text, parse_mode="Markdown")
-        except: pass
-        for adm in temporary_admins.keys():
-            try: bot.send_message(adm, report_text, parse_mode="Markdown")
-            except: pass
-        bot.send_message(user_id, "✅ Ваша жалоба отправлена администрации. Спасибо!")
-    else:
-        bot.send_message(user_id, "Вы не находитесь в диалоге.")
+# Рассылка
+@dp.callback_query(F.data == "start_broadcast")
+async def broadcast_start(call: types.CallbackQuery, state: FSMContext):
+    if not is_admin(call.from_user.id): return
+    await state.set_state(AdminStates.broadcast_msg)
+    await call.message.answer("Напишите текст сообщения для рассылки всем пользователям:")
+    await call.answer()
 
-@bot.message_handler(func=lambda message: message.text == "👍 Понравился")
-def handle_like(message):
-    user_id = message.chat.id
-    partner_id = last_partners.get(user_id)
-    if partner_id:
-        init_user_stats(partner_id)
-        user_stats[partner_id]['likes'] += 1
-        save_stats()
-        del last_partners[user_id]
-        bot.send_message(user_id, "❤️ Вы поставили лайк собеседнику!", reply_markup=get_main_menu())
-    else:
-        bot.send_message(user_id, "Вы уже оценили этого пользователя.", reply_markup=get_main_menu())
+@dp.message(AdminStates.broadcast_msg)
+async def process_broadcast(message: types.Message, state: FSMContext):
+    conn = sqlite3.connect('music_bot.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT user_id FROM users')
+    users = cursor.fetchall()
+    conn.close()
 
-@bot.message_handler(func=lambda message: message.text == "👎 Скучный")
-def handle_dislike(message):
-    user_id = message.chat.id
-    partner_id = last_partners.get(user_id)
-    if partner_id:
-        init_user_stats(partner_id)
-        user_stats[partner_id]['dislikes'] += 1
-        save_stats()
-        del last_partners[user_id]
-        bot.send_message(user_id, "👎 Вы поставили дизлайк собеседнику.", reply_markup=get_main_menu())
-    else:
-        bot.send_message(user_id, "Вы уже оценили этого пользователя.", reply_markup=get_main_menu())
-
-
-# --- ОБРАБОТКА ТЕКСТА И ФАЙЛОВ / ЧАТ ---
-
-@bot.message_handler(content_types=['text', 'photo', 'sticker', 'voice', 'video', 'audio', 'animation', 'document'])
-def echo_all(message):
-    user_id = message.chat.id
-    if user_id in banned_users: return
-
-    # Обработка шагов админки и ввода хэштегов
-    if user_id in states:
-        user_state = states[user_id]
-        step = user_state['step']
-        
-        if step == 'waiting_for_hashtag' and message.text:
-            del states[user_id]
-            tag = message.text.strip().lower()
-            if not tag.startswith('#'):
-                tag = '#' + tag
-            execute_search(user_id, tag)
-            return
-
-        elif step == "waiting_for_info_id" and message.text:
-            del states[user_id]
-            try:
-                target_id = int(message.text)
-                init_user_stats(target_id)
-                u_info = user_stats[target_id]
-                
-                is_u_ban = "Да 🚫" if target_id in banned_users else "Нет ✅"
-                is_u_adm = "Главный админ 👑" if target_id == CREATOR_ID else ("Временный админ 👮‍♂️" if target_id in temporary_admins else "Обычный юзер 👤")
-                
-                info_msg = (
-                    f"🔍 *ИНФОРМАЦИЯ О ПОЛЬЗОВАТЕЛЕ `{target_id}`*\n\n"
-                    f"🗣 Проведено диалогов: {u_info['chats_count']}\n"
-                    f"👍 Лайков: {u_info['likes']}\n"
-                    f"👎 Дизлайков: {u_info['dislikes']}\n"
-                    f"✨ Карма: {u_info['likes'] - u_info['dislikes']}\n"
-                    f"⚡️ Роль в боте: {is_u_adm}\n"
-                    f"🔨 В бане: {is_u_ban}"
-                )
-                bot.send_message(user_id, info_msg, parse_mode="Markdown", reply_markup=get_admin_menu(user_id))
-            except ValueError:
-                bot.send_message(user_id, "❌ Неверный формат ID. Введите число.")
-            return
-
-        elif step == "waiting_for_broadcast_text" and message.text:
-            del states[user_id]
-            text_to_send = message.text
-            success_count = 0
-            for uid in list(user_stats.keys()):
-                try:
-                    bot.send_message(uid, text_to_send)
-                    success_count += 1
-                except: pass
-            bot.send_message(user_id, f"📢 Рассылка завершена! Отправлено {success_count} пользователям.", reply_markup=get_admin_menu(user_id))
-            return
-
-        elif step == "waiting_for_ban_id" and message.text:
-            del states[user_id]
-            try:
-                target_id = int(message.text)
-                if target_id == CREATOR_ID:
-                    bot.send_message(user_id, "❌ Нельзя забанить создателя бота!")
-                    return
-                if target_id not in banned_users:
-                    banned_users.append(target_id)
-                    if target_id in active_chats:
-                        p_id = active_chats[target_id]
-                        del active_chats[target_id]
-                        if p_id in active_chats: del active_chats[p_id]
-                        try: bot.send_message(p_id, "🛑 Ваш собеседник был заблокирован администратором.", reply_markup=get_main_menu())
-                        except: pass
-                    remove_from_all_queues(target_id)
-                    save_stats()
-                    bot.send_message(user_id, f"🔨 Пользователь `{target_id}` успешно забанен.", parse_mode="Markdown", reply_markup=get_admin_menu(user_id))
-                    try: bot.send_message(target_id, "❌ Вы были заблокированы администрацией бота за нарушение правил.")
-                    except: pass
-                else:
-                    bot.send_message(user_id, "Этот юзер уже в бане.")
-            except ValueError:
-                bot.send_message(user_id, "❌ Неверный формат ID.")
-            return
-
-        elif step == "waiting_for_unban_id" and message.text:
-            del states[user_id]
-            try:
-                target_id = int(message.text)
-                if target_id in banned_users:
-                    banned_users.remove(target_id)
-                    save_stats()
-                    bot.send_message(user_id, f"🔓 Пользователь `{target_id}` успешно разбанен.", parse_mode="Markdown", reply_markup=get_admin_menu(user_id))
-                    try: bot.send_message(target_id, "🎉 Вы были разблокированы администрацией!")
-                    except: pass
-                else:
-                    bot.send_message(user_id, "Данный ID не найден в черном списке.")
-            except ValueError:
-                bot.send_message(user_id, "❌ Неверный формат ID.")
-            return
-
-        elif step == "waiting_for_admin_id" and message.text:
-            try:
-                target_id = int(message.text)
-                states[user_id] = {'step': "waiting_for_admin_time", 'target_id': target_id}
-                bot.send_message(user_id, f"⏱ На сколько ЧАСОВ вы хотите выдать админку пользователю `{target_id}`?:", parse_mode="Markdown")
-            except ValueError:
-                bot.send_message(user_id, "❌ Введите число.")
-            return
-
-        elif step == "waiting_for_admin_time" and message.text:
-            try:
-                hours = int(message.text)
-                target_id = states[user_id]['target_id']
-                del states[user_id]
-                
-                expire_timestamp = time.time() + (hours * 3600)
-                temporary_admins[target_id] = expire_timestamp
-                save_stats()
-                
-                bot.send_message(user_id, f"✅ Пользователь `{target_id}` стал админом на {hours} ч.", parse_mode="Markdown", reply_markup=get_admin_menu(user_id))
-                try: bot.send_message(target_id, f"👑 Вам выдали админ-права на {hours} часов! Доступ: /secretpanel")
-                except: pass
-            except ValueError:
-                bot.send_message(user_id, "❌ Введите целое число.")
-            return
-
-        elif step == "waiting_for_remove_id" and message.text:
-            try:
-                target_id = int(message.text)
-                del states[user_id]
-                if target_id in temporary_admins:
-                    del temporary_admins[target_id]
-                    save_stats()
-                    bot.send_message(user_id, f"❌ Пользователь `{target_id}` разжалован.", parse_mode="Markdown", reply_markup=get_admin_menu(user_id))
-                else:
-                    bot.send_message(user_id, "ID не найден в списке.", reply_markup=get_admin_menu(user_id))
-            except ValueError:
-                bot.send_message(user_id, "❌ Неверный формат ID.")
-            return
-
-    # Пересылка сообщений в активном чате
-    if user_id in active_chats:
-        partner_id = active_chats[user_id]
+    count = 0
+    await message.answer("🚀 Рассылка начата...")
+    for user in users:
         try:
-            if message.text: bot.send_message(partner_id, message.text)
-            elif message.photo: bot.send_photo(partner_id, message.photo[-1].file_id, caption=message.caption)
-            elif message.sticker: bot.send_sticker(partner_id, message.sticker.file_id)
-            elif message.voice: bot.send_voice(partner_id, message.voice.file_id)
-            elif message.video: bot.send_video(partner_id, message.video.file_id, caption=message.caption)
-            elif message.animation: bot.send_animation(partner_id, message.animation.file_id)
-            elif message.audio: bot.send_audio(partner_id, message.audio.file_id, caption=message.caption)
-            elif message.document: bot.send_document(partner_id, message.document.file_id, caption=message.caption)
-        except Exception as e:
-            bot.send_message(user_id, "⚠️ Не удалось доставить сообщение. Возможно, собеседник покинул бота.")
-    else:
-        if message.text not in ["🔍 Искать собеседника", "📊 Мой профиль", "❌ Отменить поиск", "🛑 Завершить диалог", "🚨 Пожаловаться", "👍 Понравился", "👎 Скучный", "🔄 Главное меню", "🌐 Искать кого угодно", "🏷 Поиск по интересам"]:
-            bot.send_message(user_id, "У вас нет активного диалога. Нажмите кнопку ниже, чтобы найти собеседника.", reply_markup=get_main_menu())
+            await bot.send_message(chat_id=user[0], text=message.text)
+            count += 1
+            await asyncio.sleep(0.05)  # Защита от лимитов Telegram
+        except Exception:
+            pass  # Пользователь заблокировал бота
 
+    await state.clear()
+    await message.answer(f"✅ Рассылка завершена! Получили сообщение: {count} пользователей.", reply_markup=get_admin_keyboard())
 
-# --- НАСТРОЙКИ FLASK ДЛЯ RENDER ---
-
-@app.route('/' + TOKEN, methods=['POST'])
-def getMessage():
-    json_string = request.get_data().decode('utf-8')
-    update = telebot.types.Update.de_json(json_string)
-    bot.process_new_updates([update])
-    return "!", 200
-
-@app.route("/")
-def webhook():
-    bot.remove_webhook()
-    bot.set_webhook(url="https://bot1-bwal.onrender.com/" + TOKEN)
-    return "Бот работает!", 200
+# --- ЗАПУСК ---
+async def main():
+    init_db()
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    asyncio.run(main())

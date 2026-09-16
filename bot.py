@@ -1,3 +1,4 @@
+import os
 import asyncio
 import sqlite3
 import logging
@@ -11,10 +12,11 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 
-# Укажи токен своего бота
-BOT_TOKEN = "ТВОЙ_ТОКЕН_БОТА"
-# Ваш Telegram ID (первоначальный суперадмин)
-SUPERADMIN_ID = 123456789  # Замени на свой real ID!
+# Получаем токен из Environment Variables на Render
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+# Твой Telegram ID как главный админ
+SUPERADMIN_ID = 6624873620
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -30,7 +32,7 @@ def init_db():
     # Таблица треков
     cursor.execute('''CREATE TABLE IF NOT EXISTS tracks (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, file_id TEXT)''')
     
-    # Добавляем суперадмина по умолчанию
+    # Добавляем тебя как главного админа по умолчанию
     cursor.execute('INSERT OR IGNORE INTO admins (user_id) VALUES (?)', (SUPERADMIN_ID,))
     conn.commit()
     conn.close()

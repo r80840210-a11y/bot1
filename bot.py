@@ -1,279 +1,187 @@
+import random
+import json
 import os
-import asyncio
-import sqlite3
-import logging
-from aiohttp import web
-from aiogram import Bot, Dispatcher, F, types
-from aiogram.filters import CommandStart
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-logging.basicConfig(level=logging.INFO)
-
-# Токен берется из Environment Variables на Render
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-
-# Твой Telegram ID
-SUPERADMIN_ID = 6624873620
-
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(storage=MemoryStorage())
-
-# --- ТЕКСТ ПРИВЕТСТВИЯ ---
-WELCOME_TEXT = (
-    "🎧 **Добро пожаловать в музыкальный бот!**\n\n"
-    "Здесь вы можете послушать эксклюзивные треки.\n\n"
-    "👤 **Создатель:** @beertimeold\n"
-    "📢 **Наш канал:** https://t.me/beertimeoldben\n\n"
-    "Выберите действие в меню ниже:"
+from telegram import Update
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
 )
 
-# --- ФЕЙКОВЫЙ СЕРВЕР ДЛЯ ОБРАБОТКИ ПОРТА RENDER ---
-async def handle_ping(request):
-    return web.Response(text="Bot is running!")
+# ============================================================
+# НАСТРОЙКИ
+# ============================================================
 
-async def start_fake_server():
-    app = web.Application()
-    app.router.add_get('/', handle_ping)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    port = int(os.getenv("PORT", 8080))
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    await site.start()
+BOT_TOKEN = "ВСТАВЬ_СЮДА_ТОКЕН_БОТА"
 
-# --- БАЗА ДАННЫХ ---
-def init_db():
-    conn = sqlite3.connect('music_bot.db')
-    cursor = conn.cursor()
-    cursor.execute('''CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY)''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS admins (user_id INTEGER PRIMARY KEY)''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS tracks (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, file_id TEXT)''')
-    cursor.execute('INSERT OR IGNORE INTO admins (user_id) VALUES (?)', (SUPERADMIN_ID,))
-    conn.commit()
-    conn.close()
+# Файл, в котором сохраняются уже выданные номера
+NUMBERS_FILE = "generated_numbers.json"
 
-def is_admin(user_id: int) -> bool:
-    conn = sqlite3.connect('music_bot.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT user_id FROM admins WHERE user_id = ?', (user_id,))
-    res = cursor.fetchone()
-    conn.close()
-    return res is not None
 
-# --- FSM (СОСТОЯНИЯ) ---
-class AdminStates(StatesGroup):
-    add_admin = State()
-    delete_admin = State()
-    track_title = State()
-    track_file = State()
-    broadcast_msg = State()
+# ============================================================
+# ЗАГРУЗКА УЖЕ ВЫДАННЫХ НОМЕРОВ
+# ============================================================
 
-# --- КЛАВИАТУРЫ ---
-def get_main_keyboard(user_id: int):
-    kb = [[InlineKeyboardButton(text="🎵 Треки", callback_data="list_tracks")]]
-    if is_admin(user_id):
-        kb.append([InlineKeyboardButton(text="⚙️ Админ-панель", callback_data="admin_panel")])
-    return InlineKeyboardMarkup(inline_keyboard=kb)
+def load_numbers():
+    if not os.path.exists(NUMBERS_FILE):
+        return set()
 
-def get_admin_keyboard():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Запостить трек", callback_data="add_track")],
-        [InlineKeyboardButton(text="👑 Добавить админа", callback_data="add_admin_start")],
-        [InlineKeyboardButton(text="❌ Удалить админа", callback_data="del_admin_start")],
-        [InlineKeyboardButton(text="📢 Рассылка", callback_data="start_broadcast")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
-    ])
+    try:
+        with open(NUMBERS_FILE, "r", encoding="utf-8") as file:
+            data = json.load(file)
 
-# --- ХЕНДЛЕРЫ ---
-@dp.message(CommandStart())
-async def cmd_start(message: types.Message):
-    conn = sqlite3.connect('music_bot.db')
-    cursor = conn.cursor()
-    cursor.execute('INSERT OR IGNORE INTO users (user_id) VALUES (?)', (message.from_user.id,))
-    conn.commit()
-    conn.close()
+        return set(data)
 
-    await message.answer(WELCOME_TEXT, parse_mode="Markdown", reply_markup=get_main_keyboard(message.from_user.id))
+    except (json.JSONDecodeError, OSError):
+        return set()
 
-@dp.callback_query(F.data == "main_menu")
-async def back_to_main(call: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    await call.message.edit_text(WELCOME_TEXT, parse_mode="Markdown", reply_markup=get_main_keyboard(call.from_user.id))
 
-# Удаление аудио-сообщения при нажатии «Назад»
-@dp.callback_query(F.data == "delete_and_back")
-async def delete_and_back(call: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    await call.message.delete()
-    await call.message.answer(WELCOME_TEXT, parse_mode="Markdown", reply_markup=get_main_keyboard(call.from_user.id))
+generated_numbers = load_numbers()
 
-# --- ПРОСЛУШИВАНИЕ ТРЕКОВ ---
-@dp.callback_query(F.data == "list_tracks")
-async def show_tracks(call: types.CallbackQuery):
-    conn = sqlite3.connect('music_bot.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT id, title FROM tracks')
-    tracks = cursor.fetchall()
-    conn.close()
 
-    if not tracks:
-        await call.answer("❌ Треков пока нет!", show_alert=True)
+# ============================================================
+# СОХРАНЕНИЕ НОМЕРОВ
+# ============================================================
+
+def save_numbers():
+    with open(NUMBERS_FILE, "w", encoding="utf-8") as file:
+        json.dump(
+            list(generated_numbers),
+            file,
+            ensure_ascii=False,
+            indent=2
+        )
+
+
+# ============================================================
+# ГЕНЕРАЦИЯ УНИКАЛЬНОГО ТЕСТОВОГО ЗНАЧЕНИЯ
+# ============================================================
+
+def generate_number():
+
+    while True:
+
+        # Генерируем 10 случайных цифр после +7.
+        digits = "".join(
+            str(random.randint(0, 9))
+            for _ in range(10)
+        )
+
+        # Формат:
+        # +7 XXX XXX XX XX
+
+        number = (
+            f"+7 {digits[0:3]} "
+            f"{digits[3:6]} "
+            f"{digits[6:8]} "
+            f"{digits[8:10]}"
+        )
+
+        # Если такого значения ещё не было —
+        # добавляем его в список.
+        if number not in generated_numbers:
+
+            generated_numbers.add(number)
+            save_numbers()
+
+            return number
+
+
+# ============================================================
+# КОМАНДА /START
+# ============================================================
+
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    await update.message.reply_text(
+        "👋 Привет!\n\n"
+        "Это бот для генерации случайных тестовых номеров.\n\n"
+        "📱 /number — получить новый номер\n"
+        "📊 /count — количество уже выданных номеров"
+    )
+
+
+# ============================================================
+# КОМАНДА /NUMBER
+# ============================================================
+
+async def number(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    new_number = generate_number()
+
+    await update.message.reply_text(
+        "📱 Новый номер:\n\n"
+        f"`{new_number}`",
+        parse_mode="Markdown"
+    )
+
+
+# ============================================================
+# КОМАНДА /COUNT
+# ============================================================
+
+async def count(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    await update.message.reply_text(
+        f"📊 Уже сгенерировано: {len(generated_numbers)}"
+    )
+
+
+# ============================================================
+# ЗАПУСК БОТА
+# ============================================================
+
+def main():
+
+    if BOT_TOKEN == "ВСТАВЬ_СЮДА_ТОКЕН_БОТА":
+
+        print(
+            "❌ Ошибка: вставь токен бота "
+            "в переменную BOT_TOKEN"
+        )
+
         return
 
-    kb = []
-    for track_id, title in tracks:
-        kb.append([InlineKeyboardButton(text=f"🎶 {title}", callback_data=f"play_{track_id}")])
-    kb.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")])
+    app = (
+        Application
+        .builder()
+        .token(BOT_TOKEN)
+        .build()
+    )
 
-    await call.message.edit_text("🎼 **Выберите трек для прослушивания:**", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    # Команды
+    app.add_handler(
+        CommandHandler("start", start)
+    )
 
-@dp.callback_query(F.data.startswith("play_"))
-async def play_track(call: types.CallbackQuery):
-    track_id = int(call.data.split("_")[1])
-    conn = sqlite3.connect('music_bot.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT title, file_id FROM tracks WHERE id = ?', (track_id,))
-    track = cursor.fetchone()
-    conn.close()
+    app.add_handler(
+        CommandHandler("number", number)
+    )
 
-    if track:
-        title, file_id = track
-        caption = f"🎵 **{title}**\n\n👤 Автор: @beertimeold\n📢 Канал: https://t.me/beertimeoldben"
-        
-        # Кнопка Назад под аудиосообщением
-        track_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="delete_and_back")]
-        ])
-        
-        await call.message.answer_audio(audio=file_id, caption=caption, parse_mode="Markdown", reply_markup=track_kb)
-        await call.answer()
-    else:
-        await call.answer("Трек не найден.", show_alert=True)
+    app.add_handler(
+        CommandHandler("count", count)
+    )
 
-# --- АДМИН ПАНЕЛЬ ---
-@dp.callback_query(F.data == "admin_panel")
-async def admin_panel(call: types.CallbackQuery):
-    if not is_admin(call.from_user.id):
-        return await call.answer("У вас нет прав!", show_alert=True)
-    await call.message.edit_text("⚙️ **Административная панель:**", parse_mode="Markdown", reply_markup=get_admin_keyboard())
+    print("================================")
+    print("🤖 Бот запущен!")
+    print("================================")
 
-@dp.callback_query(F.data == "add_track")
-async def add_track_start(call: types.CallbackQuery, state: FSMContext):
-    if not is_admin(call.from_user.id): return
-    await state.set_state(AdminStates.track_title)
-    await call.message.answer("Введите название для нового трека:")
-    await call.answer()
+    app.run_polling()
 
-@dp.message(AdminStates.track_title)
-async def process_track_title(message: types.Message, state: FSMContext):
-    await state.update_data(title=message.text)
-    await state.set_state(AdminStates.track_file)
-    await message.answer("Отправьте аудиофайл (трек):")
 
-@dp.message(AdminStates.track_file, F.audio)
-async def process_track_file(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    title = data['title']
-    file_id = message.audio.file_id
-
-    conn = sqlite3.connect('music_bot.db')
-    cursor = conn.cursor()
-    cursor.execute('INSERT INTO tracks (title, file_id) VALUES (?, ?)', (title, file_id))
-    conn.commit()
-    conn.close()
-
-    await state.clear()
-    await message.answer(f"✅ Трек **«{title}»** успешно опубликован!", parse_mode="Markdown", reply_markup=get_admin_keyboard())
-
-@dp.callback_query(F.data == "add_admin_start")
-async def add_admin_start(call: types.CallbackQuery, state: FSMContext):
-    if not is_admin(call.from_user.id): return
-    await state.set_state(AdminStates.add_admin)
-    await call.message.answer("Пришлите **ID пользователя**, которого хотите сделать админом:")
-    await call.answer()
-
-@dp.message(AdminStates.add_admin)
-async def process_add_admin(message: types.Message, state: FSMContext):
-    if not message.text.isdigit():
-        return await message.answer("ID должен состоять только из цифр. Попробуйте еще раз:")
-    
-    new_admin_id = int(message.text)
-    conn = sqlite3.connect('music_bot.db')
-    cursor = conn.cursor()
-    cursor.execute('INSERT OR IGNORE INTO admins (user_id) VALUES (?)', (new_admin_id,))
-    conn.commit()
-    conn.close()
-
-    await state.clear()
-    await message.answer(f"✅ Пользователь `{new_admin_id}` назначен админом!", parse_mode="Markdown", reply_markup=get_admin_keyboard())
-
-@dp.callback_query(F.data == "del_admin_start")
-async def del_admin_start(call: types.CallbackQuery, state: FSMContext):
-    if not is_admin(call.from_user.id): return
-    await state.set_state(AdminStates.delete_admin)
-    await call.message.answer("Пришлите **ID пользователя**, которого нужно удалить из админов:")
-    await call.answer()
-
-@dp.message(AdminStates.delete_admin)
-async def process_del_admin(message: types.Message, state: FSMContext):
-    if not message.text.isdigit():
-        return await message.answer("ID должен состоять только из цифр. Попробуйте еще раз:")
-    
-    admin_id = int(message.text)
-    if admin_id == SUPERADMIN_ID:
-        await state.clear()
-        return await message.answer("❌ Нельзя удалить главного админа!", reply_markup=get_admin_keyboard())
-
-    conn = sqlite3.connect('music_bot.db')
-    cursor = conn.cursor()
-    cursor.execute('DELETE FROM admins WHERE user_id = ?', (admin_id,))
-    conn.commit()
-    conn.close()
-
-    await state.clear()
-    await message.answer(f"✅ Пользователь `{admin_id}` удален из админов!", parse_mode="Markdown", reply_markup=get_admin_keyboard())
-
-@dp.callback_query(F.data == "start_broadcast")
-async def broadcast_start(call: types.CallbackQuery, state: FSMContext):
-    if not is_admin(call.from_user.id): return
-    await state.set_state(AdminStates.broadcast_msg)
-    await call.message.answer("Напишите текст сообщения для рассылки всем пользователям:")
-    await call.answer()
-
-@dp.message(AdminStates.broadcast_msg)
-async def process_broadcast(message: types.Message, state: FSMContext):
-    conn = sqlite3.connect('music_bot.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT user_id FROM users')
-    users = cursor.fetchall()
-    conn.close()
-
-    count = 0
-    await message.answer("🚀 Рассылка начата...")
-    for user in users:
-        try:
-            await bot.send_message(chat_id=user[0], text=message.text)
-            count += 1
-            await asyncio.sleep(0.05)
-        except Exception:
-            pass
-
-    await state.clear()
-    await message.answer(f"✅ Рассылка завершена! Получили сообщение: {count} пользователей.", reply_markup=get_admin_keyboard())
-
-# --- ЗАПУСК ---
-async def main():
-    init_db()
-    
-    # Запуск фейкового сервера для прохождения проверок порта
-    await start_fake_server()
-    
-    # Сброс вебхуков
-    await bot.delete_webhook(drop_pending_updates=True)
-    
-    await dp.start_polling(bot)
+# ============================================================
+# START
+# ============================================================
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

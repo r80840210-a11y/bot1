@@ -13,7 +13,7 @@ from telegram.ext import (
 # НАСТРОЙКИ
 # ============================================================
 
-BOT_TOKEN = "ВСТАВЬ_СЮДА_ТОКЕН_БОТА"
+BOT_TOKEN = "8888756629:AAEaRSG6glNJmkc55_PbN5pix5n3quapJMk"
 
 # Файл, в котором сохраняются уже выданные номера
 NUMBERS_FILE = "generated_numbers.json"

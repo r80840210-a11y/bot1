@@ -1,7 +1,9 @@
-import random
-import json
 import os
+import json
+import random
+import asyncio
 
+from aiohttp import web
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -13,27 +15,41 @@ from telegram.ext import (
 # НАСТРОЙКИ
 # ============================================================
 
-BOT_TOKEN = "8888756629:AAEaRSG6glNJmkc55_PbN5pix5n3quapJMk"
+# Можно указать токен здесь,
+# но на Render лучше создать переменную BOT_TOKEN
+BOT_TOKEN = os.getenv(
+    "BOT_TOKEN",
+    "8888756629:AAEaRSG6glNJmkc55_PbN5pix5n3quapJMk"
+)
 
-# Файл, в котором сохраняются уже выданные номера
+# Render сам передаёт PORT
+PORT = int(os.getenv("PORT", "10000"))
+
+HOST = "0.0.0.0"
+
 NUMBERS_FILE = "generated_numbers.json"
 
 
 # ============================================================
-# ЗАГРУЗКА УЖЕ ВЫДАННЫХ НОМЕРОВ
+# ЗАГРУЗКА ВЫДАННЫХ НОМЕРОВ
 # ============================================================
 
 def load_numbers():
-    if not os.path.exists(NUMBERS_FILE):
-        return set()
-
     try:
-        with open(NUMBERS_FILE, "r", encoding="utf-8") as file:
+        with open(
+            NUMBERS_FILE,
+            "r",
+            encoding="utf-8"
+        ) as file:
             data = json.load(file)
 
         return set(data)
 
-    except (json.JSONDecodeError, OSError):
+    except (
+        FileNotFoundError,
+        json.JSONDecodeError,
+        OSError
+    ):
         return set()
 
 
@@ -41,11 +57,17 @@ generated_numbers = load_numbers()
 
 
 # ============================================================
-# СОХРАНЕНИЕ НОМЕРОВ
+# СОХРАНЕНИЕ
 # ============================================================
 
 def save_numbers():
-    with open(NUMBERS_FILE, "w", encoding="utf-8") as file:
+
+    with open(
+        NUMBERS_FILE,
+        "w",
+        encoding="utf-8"
+    ) as file:
+
         json.dump(
             list(generated_numbers),
             file,
@@ -55,21 +77,17 @@ def save_numbers():
 
 
 # ============================================================
-# ГЕНЕРАЦИЯ УНИКАЛЬНОГО ТЕСТОВОГО ЗНАЧЕНИЯ
+# ГЕНЕРАЦИЯ УНИКАЛЬНОГО ТЕСТОВОГО НОМЕРА
 # ============================================================
 
 def generate_number():
 
     while True:
 
-        # Генерируем 10 случайных цифр после +7.
         digits = "".join(
             str(random.randint(0, 9))
             for _ in range(10)
         )
-
-        # Формат:
-        # +7 XXX XXX XX XX
 
         number = (
             f"+7 {digits[0:3]} "
@@ -78,8 +96,6 @@ def generate_number():
             f"{digits[8:10]}"
         )
 
-        # Если такого значения ещё не было —
-        # добавляем его в список.
         if number not in generated_numbers:
 
             generated_numbers.add(number)
@@ -89,7 +105,7 @@ def generate_number():
 
 
 # ============================================================
-# КОМАНДА /START
+# /START
 # ============================================================
 
 async def start(
@@ -99,14 +115,14 @@ async def start(
 
     await update.message.reply_text(
         "👋 Привет!\n\n"
-        "Это бот для генерации случайных тестовых номеров.\n\n"
+        "Я генерирую случайные тестовые номера.\n\n"
         "📱 /number — получить новый номер\n"
-        "📊 /count — количество уже выданных номеров"
+        "📊 /count — сколько уже выдано"
     )
 
 
 # ============================================================
-# КОМАНДА /NUMBER
+# /NUMBER
 # ============================================================
 
 async def number(
@@ -124,7 +140,7 @@ async def number(
 
 
 # ============================================================
-# КОМАНДА /COUNT
+# /COUNT
 # ============================================================
 
 async def count(
@@ -133,26 +149,73 @@ async def count(
 ):
 
     await update.message.reply_text(
-        f"📊 Уже сгенерировано: {len(generated_numbers)}"
+        f"📊 Уже сгенерировано: "
+        f"{len(generated_numbers)}"
     )
 
 
 # ============================================================
-# ЗАПУСК БОТА
+# HTTP SERVER ДЛЯ RENDER
 # ============================================================
 
-def main():
+async def health(request):
 
-    if BOT_TOKEN == "ВСТАВЬ_СЮДА_ТОКЕН_БОТА":
+    return web.Response(
+        text="Bot is running!"
+    )
 
+
+async def start_web_server():
+
+    app = web.Application()
+
+    app.router.add_get(
+        "/",
+        health
+    )
+
+    app.router.add_get(
+        "/health",
+        health
+    )
+
+    runner = web.AppRunner(app)
+
+    await runner.setup()
+
+    site = web.TCPSite(
+        runner,
+        HOST,
+        PORT
+    )
+
+    await site.start()
+
+    print(
+        f"🌐 HTTP server: "
+        f"{HOST}:{PORT}"
+    )
+
+    return runner
+
+
+# ============================================================
+# ЗАПУСК
+# ============================================================
+
+async def main():
+
+    if (
+        not BOT_TOKEN
+        or BOT_TOKEN == "ВСТАВЬ_ТОКЕН_СЮДА"
+    ):
         print(
-            "❌ Ошибка: вставь токен бота "
-            "в переменную BOT_TOKEN"
+            "❌ BOT_TOKEN не установлен!"
         )
-
         return
 
-    app = (
+    # Создаём Telegram-приложение
+    application = (
         Application
         .builder()
         .token(BOT_TOKEN)
@@ -160,23 +223,56 @@ def main():
     )
 
     # Команды
-    app.add_handler(
-        CommandHandler("start", start)
+    application.add_handler(
+        CommandHandler(
+            "start",
+            start
+        )
     )
 
-    app.add_handler(
-        CommandHandler("number", number)
+    application.add_handler(
+        CommandHandler(
+            "number",
+            number
+        )
     )
 
-    app.add_handler(
-        CommandHandler("count", count)
+    application.add_handler(
+        CommandHandler(
+            "count",
+            count
+        )
     )
 
-    print("================================")
-    print("🤖 Бот запущен!")
-    print("================================")
+    # Запускаем Telegram
+    await application.initialize()
+    await application.start()
 
-    app.run_polling()
+    await application.updater.start_polling()
+
+    # Запускаем HTTP-порт для Render
+    web_runner = await start_web_server()
+
+    print("==============================")
+    print("🤖 Telegram бот запущен!")
+    print("==============================")
+    print(
+        f"📊 Номеров в базе: "
+        f"{len(generated_numbers)}"
+    )
+
+    try:
+
+        # Не даём процессу завершиться
+        await asyncio.Event().wait()
+
+    finally:
+
+        await application.updater.stop()
+        await application.stop()
+        await application.shutdown()
+
+        await web_runner.cleanup()
 
 
 # ============================================================
@@ -184,4 +280,12 @@ def main():
 # ============================================================
 
 if __name__ == "__main__":
-    main()
+
+    try:
+        asyncio.run(main())
+
+    except KeyboardInterrupt:
+
+        print(
+            "🛑 Бот остановлен."
+        )

@@ -43,3 +43,10 @@ Content-Type: application/json
 ```
 
 Для production: используйте PostgreSQL, HTTPS, rate limiting, подписанные session tokens, ротацию секретов и мониторинг. Не используйте для входа в сторонние сервисы.
+
+
+## Render Web Service (один сервис)
+В этой версии `api.py` запускает HTTP API на `$PORT` и polling Telegram-бота в том же процессе. На Render используй команду запуска:
+`uvicorn api:app --host 0.0.0.0 --port $PORT`
+
+Не запускай одновременно `python bot.py` или старый Background Worker с тем же токеном — иначе Telegram выдаст `Conflict: terminated by other getUpdates request`. Удали/останови старый worker после успешного обновления. SQLite хранится на persistent disk, который подключён к этому единственному сервису.

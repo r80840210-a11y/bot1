@@ -1,5 +1,6 @@
 import os
 import time
+import asyncio
 import hmac
 import secrets
 import sqlite3
@@ -7,6 +8,7 @@ from contextlib import closing
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 from telegram import Bot
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 API_SECRET = os.environ["API_SECRET"]
@@ -15,6 +17,26 @@ CODE_TTL_SECONDS = int(os.environ.get("CODE_TTL_SECONDS", "300"))
 
 app = FastAPI(title="Private Messenger Virtual Number API")
 bot = Bot(BOT_TOKEN)
+telegram_app = Application.builder().token(BOT_TOKEN).build()
+
+async def bot_start(update, context):
+    chat_id = update.effective_chat.id
+    with closing(sqlite3.connect(DB_PATH)) as db:
+        row = db.execute("SELECT phone FROM users WHERE chat_id=?", (chat_id,)).fetchone()
+        if row:
+            phone = row[0]
+        else:
+            phone = "+7" + "".join(str(secrets.randbelow(10)) for _ in range(10))
+            db.execute("INSERT INTO users(chat_id, phone) VALUES (?, ?)", (chat_id, phone))
+            db.commit()
+    await update.message.reply_text(
+        f"Твой виртуальный номер для собственного приложения:\\n`{phone}`\\n\\n"
+        "Это внутренний идентификатор, а не реальный телефонный номер.",
+        parse_mode="Markdown"
+    )
+
+async def bot_mynumber(update, context):
+    await bot_start(update, context)
 
 def init_db():
     with closing(sqlite3.connect(DB_PATH)) as db:
@@ -31,8 +53,23 @@ def init_db():
         db.commit()
 
 @app.on_event("startup")
-def startup():
+async def startup():
     init_db()
+    # The web service binds to Render's PORT via Uvicorn. Polling runs in this
+    # same process so this deployment has only one polling instance.
+    telegram_app.add_handler(CommandHandler("start", bot_start))
+    telegram_app.add_handler(CommandHandler("mynumber", bot_mynumber))
+    await telegram_app.initialize()
+    await telegram_app.start()
+    await telegram_app.updater.start_polling()
+
+@app.on_event("shutdown")
+async def shutdown():
+    if telegram_app.updater and telegram_app.updater.running:
+        await telegram_app.updater.stop()
+    if telegram_app.running:
+        await telegram_app.stop()
+    await telegram_app.shutdown()
 
 def require_secret(x_api_key):
     if not x_api_key or not hmac.compare_digest(x_api_key, API_SECRET):

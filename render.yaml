@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: virtual-number-api
+    name: virtual-number-bot-api
     runtime: python
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn api:app --host 0.0.0.0 --port $PORT
@@ -9,20 +9,6 @@ services:
         sync: false
       - key: API_SECRET
         generateValue: true
-      - key: DB_PATH
-        value: /var/data/virtual_numbers.db
-    disk:
-      name: virtual-number-data
-      mountPath: /var/data
-      sizeGB: 1
-  - type: worker
-    name: virtual-number-bot
-    runtime: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: python bot.py
-    envVars:
-      - key: BOT_TOKEN
-        sync: false
       - key: DB_PATH
         value: /var/data/virtual_numbers.db
     disk:

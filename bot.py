@@ -1,4 +1,5 @@
 import os
+import asyncio
 import secrets
 import time
 import logging
@@ -80,14 +81,25 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-def main():
+async def main():
+    # Render Web Service health endpoint and Telegram polling run side-by-side.
     start_health_server()
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("used", used))
     app.add_handler(CommandHandler("help", help_command))
-    app.run_polling()
+
+    # Explicitly manage the asyncio lifecycle instead of run_polling(), which
+    # can fail in some hosted runtimes if an event loop is not available.
+    async with app:
+        await app.start()
+        await app.updater.start_polling()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await app.updater.stop()
+            await app.stop()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

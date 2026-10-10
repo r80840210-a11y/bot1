@@ -124,3 +124,9 @@ def verify_code(body: VerifyCode, x_api_key: str | None = Header(default=None)):
         db.commit()
     # Production apps should issue a signed session token here.
     return {"ok": True, "authenticated": True, "phone": body.phone}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    # Render supplies PORT automatically; 10000 is only a local fallback.
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "10000")))

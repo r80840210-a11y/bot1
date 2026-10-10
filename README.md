@@ -50,3 +50,4 @@ Content-Type: application/json
 `uvicorn api:app --host 0.0.0.0 --port $PORT`
 
 Не запускай одновременно `python bot.py` или старый Background Worker с тем же токеном — иначе Telegram выдаст `Conflict: terminated by other getUpdates request`. Удали/останови старый worker после успешного обновления. SQLite хранится на persistent disk, который подключён к этому единственному сервису.
+\n\nПорт добавлен: приложение слушает `0.0.0.0` и читает номер порта из переменной окружения `PORT` (локальный запасной порт — `10000`). Для Render Start Command: `uvicorn api:app --host 0.0.0.0 --port $PORT`. Не указывай фиксированный порт вместо `$PORT` в настройках Render.\n

@@ -1,105 +1,62 @@
 import os
 import asyncio
 import secrets
-import time
-import logging
-import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-
+import sqlite3
+from contextlib import closing
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-logging.basicConfig(level=logging.INFO)
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-CODE_TTL = int(os.getenv("CODE_TTL_SECONDS", "300"))
+DB_PATH = os.environ.get("DB_PATH", "virtual_numbers.db")
 
-# Demo only: this is a randomly generated number-shaped placeholder, not a real
-# assigned phone number and it cannot receive SMS. Each user gets one per session.
-sessions = {}
-codes = {}
+def init_db():
+    with closing(sqlite3.connect(DB_PATH)) as db:
+        db.execute("""CREATE TABLE IF NOT EXISTS users (
+            chat_id INTEGER PRIMARY KEY,
+            phone TEXT UNIQUE NOT NULL
+        )""")
+        db.commit()
 
+def new_phone():
+    # Internal identifier only; not a real telephone number.
+    return "+7" + "".join(str(secrets.randbelow(10)) for _ in range(10))
 
-def make_demo_number():
-    # Demo +7 format for UI/testing only; every digit after +7 is random, so this is not guaranteed to be an assigned phone number.
-    digits = "".join(str(secrets.randbelow(10)) for _ in range(10))
-    return f"+7 ({digits[:3]}) {digits[3:6]}-{digits[6:8]}-{digits[8:10]}"
-
-
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
-        self.end_headers()
-        self.wfile.write(b"Bot is running")
-
-    def log_message(self, format, *args):
-        return
-
-
-def start_health_server():
-    port = int(os.environ.get("PORT", "10000"))
-    server = ThreadingHTTPServer(("0.0.0.0", port), HealthHandler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-
+def get_or_create_phone(chat_id):
+    with closing(sqlite3.connect(DB_PATH)) as db:
+        row = db.execute("SELECT phone FROM users WHERE chat_id=?", (chat_id,)).fetchone()
+        if row:
+            return row[0]
+        for _ in range(20):
+            phone = new_phone()
+            try:
+                db.execute("INSERT INTO users(chat_id, phone) VALUES (?, ?)", (chat_id, phone))
+                db.commit()
+                return phone
+            except sqlite3.IntegrityError:
+                continue
+        raise RuntimeError("Could not allocate a unique virtual ID")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    session = sessions.setdefault(user_id, {"phone": make_demo_number(), "confirmed": False})
+    chat_id = update.effective_chat.id
+    phone = get_or_create_phone(chat_id)
     await update.message.reply_text(
-        "Тестовый номер: " + session["phone"] + "\n\n"
-        "Это случайный демонстрационный номер: он не является реальной SIM-картой "
-        "и не может принимать SMS.\n\n"
-        "Когда закончишь тестировать номер, отправь /used — бот выдаст внутренний тестовый код."
+        "Твой виртуальный номер для собственного приложения:\n"
+        f"`{phone}`\n\n"
+        "Это внутренний идентификатор, а не реальный телефонный номер. "
+        "Когда приложение запросит вход по нему, одноразовый код придёт сюда.",
+        parse_mode="Markdown"
     )
 
+async def mynumber(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    phone = get_or_create_phone(update.effective_chat.id)
+    await update.message.reply_text(f"Твой виртуальный номер: `{phone}`", parse_mode="Markdown")
 
-async def used(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    session = sessions.get(user_id)
-    if not session:
-        await update.message.reply_text("Сначала получи тестовый номер командой /start.")
-        return
-    if session["confirmed"]:
-        await update.message.reply_text("Код уже выдавался для этого тестового номера. Для нового теста отправь /start.")
-        return
-
-    session["confirmed"] = True
-    value = f"{secrets.randbelow(1_000_000):06d}"
-    codes[user_id] = {"code": value, "expires": int(time.time()) + CODE_TTL, "used": False}
-    await update.message.reply_text(
-        f"Внутренний тестовый код: {value}\n"
-        f"Действует {max(1, CODE_TTL // 60)} мин.\n"
-        "Это код самого бота, не SMS-код от телефонного оператора или стороннего сервиса."
-    )
-
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "/start — получить случайный демонстрационный номер +7\n"
-        "/used — подтвердить использование номера и получить внутренний тестовый код\n"
-        "/help — помощь"
-    )
-
-
-async def main():
-    # Render Web Service health endpoint and Telegram polling run side-by-side.
-    start_health_server()
+def main():
+    init_db()
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("used", used))
-    app.add_handler(CommandHandler("help", help_command))
-
-    # Explicitly manage the asyncio lifecycle instead of run_polling(), which
-    # can fail in some hosted runtimes if an event loop is not available.
-    async with app:
-        await app.start()
-        await app.updater.start_polling()
-        try:
-            await asyncio.Event().wait()
-        finally:
-            await app.updater.stop()
-            await app.stop()
-
+    app.add_handler(CommandHandler("mynumber", mynumber))
+    app.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
